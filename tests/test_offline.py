@@ -93,7 +93,8 @@ def test_rates_reflect_the_rules():
 
 
 def test_signed_in_routes_need_a_token():
-    for path in ("/me", "/accounts", "/payment-methods", "/referrals/link", "/transactions"):
+    for path in ("/me", "/accounts", "/payment-methods", "/referrals/link", "/transactions",
+                 "/trades/open", "/trades/closed", "/trades/stats", "/reports/profit", "/confirmations"):
         r = client.get(path)
         assert r.status_code == 401, path
         assert r.json()["detail"]
@@ -167,3 +168,18 @@ def test_signup_existing_email(monkeypatch):
     monkeypatch.setattr(auth_router.supabase_auth, "sign_up", fake_sign_up)
     r = client.post("/auth/signup", json={"name": "Ada", "email": "ada@example.com", "password": "longenough"})
     assert r.status_code == 409
+
+
+def test_trading_routes_need_a_token():
+    assert client.post("/trades", json={"symbol": "EUR/USD", "direction": "Rise", "stake": 10,
+                                        "payout_pct": 88, "duration_s": 6, "entry_price": "1.08"}).status_code == 401
+    assert client.post("/trades/OB-XXXXXXX/settle", json={"exit_price": "1.09"}).status_code == 401
+    assert client.post("/accounts/demo/reset").status_code == 401
+
+
+def test_prices_are_read_like_the_chart_writes_them():
+    from app.routers.trades import _num, _price
+    assert _price("18,642.10") == Decimal("18642.10")
+    assert _num(_price("1.08420")) == "1.0842"
+    with pytest.raises(Exception):
+        _price("abc")

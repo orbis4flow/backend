@@ -8,6 +8,7 @@ The backend does not create or change tables on its own. You run these files by 
 |---|---|
 | `001_schema.sql` | Creates the `app` schema and its tables: profiles, accounts, payment methods, transactions, webhook events. |
 | `002_security.sql` | Makes sure the browser-facing roles (`anon`, `authenticated`) can never reach the `app` schema, and turns row level security on. |
+| `003_trades.sql` | The trades table: every contract, its stake, prices and result. |
 | `admin/check_setup.sql` | Confirms both ran. Every row should read `ok`. |
 
 Both setup files are safe to run again.

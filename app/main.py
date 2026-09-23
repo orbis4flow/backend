@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 
 from . import db, supabase_auth
 from .config import get_settings
-from .routers import auth, me, payment_methods, payments, referrals, webhooks
+from .routers import auth, me, payment_methods, payments, referrals, trades, webhooks
 
 # psycopg's async driver needs the selector loop on Windows (local dev only)
 if sys.platform == "win32":
@@ -69,7 +69,8 @@ async def unexpected(_: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": "Something went wrong on our side. Try again."})
 
 
-for r in (auth.router, me.router, payment_methods.router, referrals.router, payments.router, webhooks.router):
+for r in (auth.router, me.router, payment_methods.router, referrals.router, payments.router, trades.router,
+          webhooks.router):
     app.include_router(r)
 
 
@@ -81,5 +82,12 @@ async def health():
         database = "ok"
     except Exception as e:
         database = await db.diagnose(e)
-    return {"ok": database == "ok", "database": database,
+    trading = "unknown"
+    if database == "ok":
+        try:
+            await db.one("select 1 from app.trades limit 1")
+            trading = "ok"
+        except Exception:                               # sql/003_trades.sql not run yet
+            trading = "run sql/003_trades.sql"
+    return {"ok": database == "ok", "database": database, "trading": trading,
             "payhero": s.payhero_ready, "paystack": s.paystack_ready}

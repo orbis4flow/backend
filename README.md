@@ -10,7 +10,8 @@ In the Supabase SQL editor, run in order, then check:
 
 1. `sql/001_schema.sql`
 2. `sql/002_security.sql`
-3. `sql/admin/check_setup.sql`: every row should read `ok`
+3. `sql/003_trades.sql`
+4. `sql/admin/check_setup.sql`: every row should read `ok`
 
 See `sql/README.md` for the admin queries (withdrawal review, lookups, verifying methods).
 
@@ -115,6 +116,12 @@ All JSON. Signed-in routes take `Authorization: Bearer <access_token>`. Errors a
 | POST | `/payments/withdraw` | `{amount_usd, payment_method_id}` |
 | GET | `/payments/{reference}` | one payment's state; polls the provider while it is open |
 | GET | `/transactions` | history, newest first |
+| POST | `/trades` | `{account: demo, symbol, direction: Rise\|Fall, stake, payout_pct, duration_s, entry_price}`: takes the stake, opens the contract |
+| POST | `/trades/{ref}/settle` | `{exit_price}` at expiry: Rise wins above the entry, Fall below; pays back stake + payout |
+| POST | `/trades/{ref}/sell` | sells an open contract back for 75% of the stake |
+| GET | `/trades/open`, `/trades/closed`, `/trades/stats` | positions and their breakdown |
+| GET | `/reports/profit`, `/confirmations` | the profit table and trade confirmations pages |
+| POST | `/accounts/demo/reset` | tops the demo balance back up to $10,000 once nothing is open on it |
 | POST | `/webhooks/payhero`, `/webhooks/paystack` | provider callbacks |
 | GET | `/health` | database and provider readiness |
 
@@ -133,6 +140,18 @@ python -m pip install pytest && python -m pytest -q    # offline tests, no keys 
 
 To receive PayHero callbacks on your machine, expose port 8000 with a tunnel (e.g. `cloudflared tunnel --url http://localhost:8000`) and set `PUBLIC_API_URL` in `.env` to the tunnel address.
 
-## Not built yet
+## Trading
 
-Trading (contracts, settlement, demo balance changes), referral earnings, KYC document review, and the Academy checkout run on the UI's local simulation for now. `/referrals/earnings` answers empty until earnings exist.
+Demo only. Placing takes the stake from the demo balance in the same transaction that opens the contract, and settling pays back stake plus payout on a win. The result comes from the entry and exit prices the client's chart saw, which is acceptable for practice money and not for real money, so `/trades` refuses `account: real`. A contract nobody settles (the tab was closed) is settled by the server 30 seconds after expiry, at even odds.
+
+## Next
+
+In the order they unblock the most:
+
+1. **A server-side price feed, then real-money trading.** Prices and settlement have to come from the server before a real balance can be staked: the backend records the entry and exit itself instead of trusting the browser. Crypto from Binance's public WebSocket, forex and metals from a provider such as Twelve Data, Finnhub or OANDA, and the synthetic indices generated on the server. The UI chart then draws from the same feed.
+2. **Identity verification.** The verification page runs locally. Smile ID (built for African IDs, including Kenyan national ID and KRA PIN) or Sumsub, with their webhook setting a verified flag that withdrawals check.
+3. **USDT deposits.** The address flow ends on "I have sent it". TronGrid watching the deposit address for incoming TRC-20 USDT would credit it automatically.
+4. **Automated payouts.** Withdrawals are manual. Paystack Transfers can pay Kenyan bank accounts and M-Pesa from the Paystack balance you already hold.
+5. **Email and SMS.** Receipts for deposits, withdrawal status, password and security notices: Resend or Postmark for email, Africa's Talking for SMS.
+6. **Referral earnings.** Now that trades are recorded, a weekly job can compute each referrer's share of the spread and fill `/referrals/earnings`.
+7. **Market news and the economic calendar.** Finnhub or Financial Modeling Prep serve both.

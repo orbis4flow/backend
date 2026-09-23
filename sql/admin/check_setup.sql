@@ -8,7 +8,7 @@ select 'schema app' as item,
 union all
 select 'table ' || t,
        case when to_regclass('app.' || t) is not null then 'ok' else 'MISSING' end
-from unnest(array['profiles', 'accounts', 'payment_methods', 'transactions', 'webhook_events']) as t
+from unnest(array['profiles', 'accounts', 'payment_methods', 'transactions', 'webhook_events', 'trades']) as t
 union all
 select 'rls on ' || c.relname,
        case when c.relrowsecurity then 'ok' else 'OFF, run 002_security.sql' end

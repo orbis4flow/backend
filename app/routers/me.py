@@ -60,5 +60,7 @@ async def update_me(body: ProfileUpdate, user: AuthUser = Depends(current_user))
 
 @router.get("/accounts")
 async def accounts(user: AuthUser = Depends(current_user)):
+    from .trades import sweep                 # settle abandoned contracts before reporting balances
     await profiles.for_user(user)
+    await sweep(user.id)
     return await profiles.accounts(user.id)
