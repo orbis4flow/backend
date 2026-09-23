@@ -16,6 +16,16 @@ OPEN = ("pending", "processing")
 async def complete_deposit(reference: str, *, receipt: str | None = None,
                            provider_ref: str | None = None) -> dict | None:
     """Credit a deposit. Returns the new balance, or None if it was already settled."""
+    done = await _complete_deposit(reference, receipt, provider_ref)
+    if done:                                         # the receipt goes out once, with the credit
+        from . import notify
+        tx = await db.one("select * from app.transactions where reference = %s", (reference,))
+        if tx:
+            notify._later(notify.deposit_received(tx))
+    return done
+
+
+async def _complete_deposit(reference: str, receipt: str | None, provider_ref: str | None) -> dict | None:
     return await db.one(
         """with t as (
              update app.transactions

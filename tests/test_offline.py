@@ -183,3 +183,41 @@ def test_prices_are_read_like_the_chart_writes_them():
     assert _num(_price("1.08420")) == "1.0842"
     with pytest.raises(Exception):
         _price("abc")
+
+
+# -------------------------------------------------- usdt, referrals, email --
+def test_usdt_exact_amounts_carry_cents():
+    from app.services.tron import MICRO, exact_amount
+    for _ in range(300):
+        a = exact_amount(Decimal("50.00"))
+        assert Decimal("50.01") <= a <= Decimal("50.99") and a == a.quantize(Decimal("0.01"))
+    # a transfer of 50.37 USDT (6 decimals on chain) matches a request stored as 50.37
+    assert Decimal("50370000") / MICRO == Decimal("50.37")
+    assert {Decimal("50.37"): 1}.get(Decimal("50370000") / MICRO) == 1
+
+
+def test_referral_weeks_tiers_and_payday():
+    from datetime import date
+    from app.services.referrals import payday, period, tier_for, week_of
+    assert week_of(date(2026, 9, 23)) == date(2026, 9, 21)          # a Wednesday -> its Monday
+    assert payday(date(2026, 9, 14)).date() == date(2026, 9, 24)      # week of the 14th pays Thursday 24th
+    assert period(date(2026, 9, 14)) == "14-20 Sep 2026"
+    assert period(date(2026, 9, 28)) == "28 Sep - 4 Oct 2026"
+    assert (tier_for(0), tier_for(1), tier_for(10), tier_for(50)) == (0, 20, 28, 35)
+
+
+def test_email_page_escapes_and_brands():
+    from app.services.notify import _page
+    html = _page("Deposit <b>", ["Hello"], [("Credited", "$5.00")], ("Open", "https://x.test/cashier"))
+    assert "Deposit &lt;b&gt;" in html and "$5.00" in html and "https://x.test/cashier" in html
+
+
+def test_market_routes_are_public_and_empty_without_data(monkeypatch):
+    from app.routers import market
+    async def nothing():
+        return []
+    monkeypatch.setattr(market, "_cache", {})
+    monkeypatch.setattr(market, "_fetch_news", nothing)
+    monkeypatch.setattr(market, "_fetch_calendar", nothing)
+    assert client.get("/news").json() is None
+    assert client.get("/calendar", params={"range": "week"}).json() is None

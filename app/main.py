@@ -14,8 +14,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import db, supabase_auth
+from .services import referrals as referral_jobs, tron
 from .config import get_settings
-from .routers import auth, me, payment_methods, payments, referrals, trades, webhooks
+from .routers import auth, market, me, payment_methods, payments, referrals, trades, webhooks
 
 # psycopg's async driver needs the selector loop on Windows (local dev only)
 if sys.platform == "win32":
@@ -28,7 +29,13 @@ log = logging.getLogger("orbisflow")
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await db.open_pool()
+    stop = asyncio.Event()
+    # background jobs: USDT deposits to match, referral earnings to count and pay
+    jobs = [asyncio.create_task(tron.watch(stop)), asyncio.create_task(referral_jobs.work(stop))]
     yield
+    stop.set()
+    for j in jobs:
+        j.cancel()
     await supabase_auth.close()
     await db.close_pool()
 
@@ -70,7 +77,7 @@ async def unexpected(_: Request, exc: Exception):
 
 
 for r in (auth.router, me.router, payment_methods.router, referrals.router, payments.router, trades.router,
-          webhooks.router):
+          market.router, webhooks.router):
     app.include_router(r)
 
 
@@ -89,5 +96,13 @@ async def health():
             trading = "ok"
         except Exception:                               # sql/003_trades.sql not run yet
             trading = "run sql/003_trades.sql"
-    return {"ok": database == "ok", "database": database, "trading": trading,
-            "payhero": s.payhero_ready, "paystack": s.paystack_ready}
+    extras = "unknown"
+    if database == "ok":
+        try:
+            await db.one("select 1 from app.referral_earnings limit 1")
+            extras = "ok"
+        except Exception:                               # sql/004 not run yet
+            extras = "run sql/004_notifications_usdt_referrals.sql"
+    return {"ok": database == "ok", "database": database, "trading": trading, "notifications_usdt_referrals": extras,
+            "payhero": s.payhero_ready, "paystack": s.paystack_ready,
+            "email": s.email_ready, "sms": s.sms_ready, "news": bool(s.finnhub_api_key)}

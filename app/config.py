@@ -41,6 +41,28 @@ class Settings(BaseSettings):
     paystack_secret_key: str = ""
     paystack_currency: str = "KES"                # the currency the Paystack account settles in
 
+    # ----------------------------------------------------- email (Resend) ---
+    resend_api_key: str = ""
+    email_from: str = "orbisflow <no-reply@orbisflow.com>"   # a sender on a domain verified in Resend
+    support_email: str = "support@orbisflow.com"
+
+    # --------------------------------------------- SMS (Africa's Talking) ---
+    at_username: str = ""                          # "sandbox" while testing
+    at_api_key: str = ""
+    at_sender_id: str = ""                         # an approved sender ID; empty uses the shared one
+
+    # ----------------------------------------------- market data (free) ---
+    finnhub_api_key: str = ""                      # free key from finnhub.io, for market news
+
+    # ---------------------------------------------- USDT deposits (TRON) ---
+    usdt_deposit_address: str = "TXqLJrvZc9ouyVPai66WR55dvDVetR83BH"
+    trongrid_api_key: str = ""                     # optional, free from trongrid.io; raises the rate limit
+    usdt_contract: str = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"   # Tether USD on TRON
+    usdt_request_minutes: int = 120                # how long an exact-amount request stays open
+
+    # ------------------------------------------------- referral earnings ---
+    referral_spread_pct: float = 0.75              # orbisflow's spread, as a share of real-money volume
+
     @field_validator("frontend_url", "public_api_url", "supabase_url")
     @classmethod
     def _no_trailing_slash(cls, v: str) -> str:
@@ -69,6 +91,14 @@ class Settings(BaseSettings):
     @property
     def paystack_ready(self) -> bool:
         return bool(self.paystack_secret_key)
+
+    @property
+    def email_ready(self) -> bool:
+        return bool(self.resend_api_key)
+
+    @property
+    def sms_ready(self) -> bool:
+        return bool(self.at_username and self.at_api_key)
 
 
 @lru_cache

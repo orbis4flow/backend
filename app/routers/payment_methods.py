@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from .. import db
 from ..security import AuthUser, current_user
-from ..services import profiles
+from ..services import notify, profiles
 from ..util import TRON_ADDRESS, kenyan_msisdn, mask_phone, mask_tail, mask_wallet
 
 router = APIRouter(prefix="/payment-methods", tags=["payment methods"])
@@ -91,6 +91,7 @@ async def add_method(body: NewMethod, user: AuthUser = Depends(current_user)):
         if not msisdn:
             raise HTTPException(status_code=400, detail="Enter a Safaricom number, like 0712 345 678.")
         row = await upsert_mpesa(user.id, msisdn, holder)
+        notify._later(notify.method_added(user.id, row["label"], row["masked"]))
         return public(row)
 
     if body.kind == "bank":
@@ -114,7 +115,9 @@ async def add_method(body: NewMethod, user: AuthUser = Depends(current_user)):
         (user.id, body.kind, fp))
     if existing and existing["removed_at"] is None:
         raise HTTPException(status_code=409, detail="You have already added this one.")
-    return public(await save_method(user.id, body.kind, label, masked, fp, details))
+    row = await save_method(user.id, body.kind, label, masked, fp, details)
+    notify._later(notify.method_added(user.id, row["label"], row["masked"]))
+    return public(row)
 
 
 @router.delete("/{method_id}", status_code=204)

@@ -40,6 +40,20 @@ where owner.referral_code = upper('ORBIS-XXXX')
 order by joined.created_at desc;
 
 
+-- USDT transfers that matched no request (wrong amount, late): credit these by hand
+select reference as tx_hash, received_at, error, payload->>'from' as sender, payload->>'value' as micro_usdt
+from app.webhook_events
+where provider = 'tron' and not processed
+order by id desc;
+
+
+-- the latest emails and SMS, and any that failed
+select created_at, channel, kind, to_address, status, error
+from app.notifications
+order by id desc
+limit 50;
+
+
 -- the latest provider callbacks, to see exactly what PayHero or Paystack sent
 select id, provider, reference, received_at, processed, error, payload
 from app.webhook_events

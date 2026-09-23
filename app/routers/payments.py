@@ -7,7 +7,7 @@ refunds) with sql/admin/withdrawals.sql.
 Limits: deposits from MIN_DEPOSIT_USD, withdrawals from MIN_WITHDRAW_USD
 with WITHDRAW_FEE_USD charged on top of the amount.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,13 +17,17 @@ from pydantic import BaseModel, Field
 from .. import db
 from ..config import get_settings
 from ..security import AuthUser, current_user
-from ..services import ledger, payhero, paystack, profiles, settle
+from psycopg.errors import UniqueViolation
+
+from ..services import ledger, notify, payhero, paystack, profiles, settle, tron
 from ..util import kenyan_msisdn, kes_down, kes_up, mask_phone, reference, show_date, usd
 from .payment_methods import upsert_mpesa
 
 router = APIRouter(tags=["payments"])
 
-METHOD_LABEL = {"mpesa": "M-Pesa", "card": "Card", "bank": "Bank transfer", "usdt": "USDT (TRC-20)"}
+METHOD_LABEL = {"mpesa": "M-Pesa", "card": "Card", "bank": "Bank transfer", "usdt": "USDT (TRC-20)",
+                "referral": "Referral earnings"}
+TYPE_LABEL = {"deposit": "Deposit", "withdrawal": "Withdrawal", "referral": "Referral"}
 STATUS_LABEL = {"pending": "Pending", "processing": "Processing", "review": "In review",
                 "completed": "Completed", "failed": "Failed", "cancelled": "Cancelled"}
 
@@ -38,17 +42,21 @@ class CardDeposit(BaseModel):
     amount_usd: float = Field(gt=0)
 
 
+class UsdtDeposit(BaseModel):
+    amount_usd: float = Field(gt=0)
+
+
 class Withdrawal(BaseModel):
     amount_usd: float = Field(gt=0)
     payment_method_id: str
 
 
 def public(t: dict) -> dict:
-    sign = 1 if t["type"] == "deposit" else -1
+    sign = -1 if t["type"] == "withdrawal" else 1
     return {
         # for display, as the cashier table reads it
         "when": show_date(t["created_at"]),
-        "type": "Deposit" if t["type"] == "deposit" else "Withdrawal",
+        "type": TYPE_LABEL[t["type"]],
         "method": METHOD_LABEL[t["method"]],
         "ref": t["reference"],
         "status": STATUS_LABEL[t["status"]],
@@ -179,6 +187,36 @@ async def deposit_card(body: CardDeposit, user: AuthUser = Depends(current_user)
             "localAmount": float(local), "localCurrency": currency}
 
 
+# -------------------------------------------------------------------- USDT --
+@router.post("/payments/deposit/usdt", status_code=201)
+async def deposit_usdt(body: UsdtDeposit, user: AuthUser = Depends(current_user)):
+    """An exact amount to send. The deposit credits itself when a confirmed
+    transfer of exactly that much reaches the address (services/tron.py)."""
+    s = get_settings()
+    await profiles.for_user(user)
+    base = _deposit_amount(body.amount_usd)
+    for _ in range(12):
+        exact = tron.exact_amount(base)
+        ref = reference("DP")
+        try:
+            async with db.tx() as conn:
+                await _insert(conn, user_id=user.id, account_id=await profiles.real_account_id(user.id, conn),
+                              type="deposit", method="usdt", provider="tron", amount_usd=exact,
+                              fee_usd=Decimal("0"), net_usd=exact, local_amount=exact, local_currency="USDT",
+                              fx_rate=Decimal("1"), reference=ref, destination=s.usdt_deposit_address,
+                              meta=Jsonb({"network": "TRC-20"}))
+            break
+        except UniqueViolation:                      # that exact amount is already open: draw again
+            continue
+    else:
+        raise HTTPException(status_code=503, detail="Too many USDT deposits are open right now. Try again shortly.")
+    tx = await db.one("select * from app.transactions where reference = %s", (ref,))
+    out = public(tx)
+    out.update({"address": s.usdt_deposit_address, "network": "TRC-20", "amountUsdt": f"{exact:.2f}",
+                "expiresAt": (tx["created_at"] + timedelta(minutes=s.usdt_request_minutes)).isoformat()})
+    return out
+
+
 # ------------------------------------------------------------ withdrawals --
 @router.post("/payments/withdraw", status_code=201)
 async def withdraw(body: Withdrawal, user: AuthUser = Depends(current_user)):
@@ -217,6 +255,7 @@ async def withdraw(body: Withdrawal, user: AuthUser = Depends(current_user)):
                            fx_rate=Decimal(str(s.usd_kes_rate)) if kes is not None else None,
                            reference=ref, destination=m["masked"], meta=Jsonb({}))
 
+    notify._later(notify.withdrawal_requested(tx))
     return public(tx)
 
 
@@ -236,11 +275,13 @@ async def payment(ref: str, user: AuthUser = Depends(current_user)):
     if not tx:
         raise HTTPException(status_code=404, detail="That payment was not found.")
     age = (datetime.now(timezone.utc) - tx["created_at"]).total_seconds()
-    if tx["status"] in ("pending", "processing") and age > 8:
+    if tx["status"] in ("pending", "processing") and (age > 8 or tx["provider"] == "tron"):
         if tx["provider"] == "payhero":
             await settle.payhero_check(tx)
         elif tx["provider"] == "paystack":
             await settle.paystack_check(tx)
+        elif tx["provider"] == "tron":
+            await tron.scan()
         tx = await db.one("select * from app.transactions where reference = %s", (ref,))
     out = public(tx)
     if tx["status"] == "completed":

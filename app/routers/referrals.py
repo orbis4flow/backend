@@ -1,15 +1,18 @@
 """Referral links. Every account gets a code when its profile is created;
 the link is FRONTEND_URL/r/<code>, which the UI sends to sign-up."""
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
+from psycopg.errors import UndefinedTable
 from pydantic import BaseModel, Field
 
 from .. import db
 from ..config import get_settings
 from ..security import AuthUser, current_user
 from ..services import profiles
-from ..util import show_day
+from ..services.referrals import payday, period
+from ..util import show_day, usd
 
 router = APIRouter(prefix="/referrals", tags=["referrals"])
 
@@ -56,20 +59,52 @@ async def claim(body: Claim, user: AuthUser = Depends(current_user)):
 
 @router.get("")
 async def referred(user: AuthUser = Depends(current_user)):
-    """Everyone who joined with this user's code. Earnings arrive with the
-    trading service; until then volume and earned are zero."""
+    """Everyone who joined with this user's code: whether they have funded an
+    account, their real-money volume, and what it has earned the referrer."""
     rows = await db.many(
-        """select p.email, p.created_at,
+        """select p.id, p.email, p.created_at,
                   exists (select 1 from app.transactions t
                            where t.user_id = p.id and t.type = 'deposit' and t.status = 'completed') as funded
              from app.profiles p
             where p.referred_by = %s
             order by p.created_at desc""", (user.id,))
+    if not rows:
+        return []
+    try:
+        vol = {r["user_id"]: r["volume"] for r in await db.many(
+            """select t.user_id, sum(t.stake) as volume from app.trades t
+                where t.user_id = any(%s) and t.account_kind = 'real' and t.status <> 'open'
+                group by t.user_id""", ([r["id"] for r in rows],))}
+        weeks = await db.many(
+            "select volume, amount from app.referral_earnings where referrer_id = %s", (user.id,))
+    except UndefinedTable:                               # trading or earnings tables not set up yet
+        vol, weeks = {}, []
+    total_vol = sum((w["volume"] for w in weeks), Decimal("0"))
+    total_amt = sum((w["amount"] for w in weeks), Decimal("0"))
+    rate = (total_amt / total_vol) if total_vol else Decimal("0")     # what each dollar has earned, overall
     return [{"user": _mask_email(r["email"]), "joined": show_day(r["created_at"]),
-             "status": "Active" if r["funded"] else "Pending", "volume": 0, "earned": 0} for r in rows]
+             "status": "Active" if r["funded"] else "Pending",
+             "volume": float(vol.get(r["id"], 0)),
+             "earned": float(usd(vol.get(r["id"], Decimal("0")) * rate))} for r in rows]
 
 
 @router.get("/earnings")
 async def earnings(user: AuthUser = Depends(current_user)):
-    """Null until the first earnings exist, so the UI shows its empty state."""
-    return None
+    """Week by week, newest first. Null until the first week with earnings,
+    so the page shows its empty state."""
+    try:
+        rows = await db.many(
+            """select * from app.referral_earnings
+                where referrer_id = %s and (amount > 0 or status = 'pending')
+                order by week_start desc limit 52""", (user.id,))
+    except UndefinedTable:
+        return None
+    if not any(r["amount"] > 0 for r in rows):
+        return None
+    paid = sum((r["amount"] for r in rows if r["status"] == "paid"), Decimal("0"))
+    pending = sum((r["amount"] for r in rows if r["status"] == "pending"), Decimal("0"))
+    return {"paid": float(paid), "pending": float(pending),
+            "weeks": [{"period": period(r["week_start"]), "active": r["active"], "volume": float(r["volume"]),
+                       "amount": float(r["amount"]), "tier": float(r["tier_pct"]),
+                       "status": "Paid" if r["status"] == "paid" else "Pending",
+                       "paysOn": payday(r["week_start"]).date().isoformat()} for r in rows]}

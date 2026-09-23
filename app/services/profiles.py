@@ -35,15 +35,17 @@ async def ensure(user_id: str, email: str, full_name: str | None = None,
         ref = await referrer_id(ref_code, conn)
         if ref == user_id:
             ref = None
+        created = False
         for _ in range(8):
             try:
                 async with conn.transaction():      # a savepoint, so a clash can retry
-                    await conn.execute(
+                    ins = await conn.execute(
                         """insert into app.profiles (id, email, full_name, referral_code, referred_by)
                            values (%s, %s, %s, %s, %s)
                            on conflict (id) do nothing""",
                         (user_id, email, (full_name or "").strip() or None, referral_code(), ref),
                     )
+                    created = ins.rowcount > 0
                 break
             except UniqueViolation:
                 continue                             # the random code was taken, draw again
@@ -57,7 +59,11 @@ async def ensure(user_id: str, email: str, full_name: str | None = None,
             (user_id, Decimal(str(s.demo_balance_usd)), user_id),
         )
         cur = await conn.execute("select * from app.profiles where id = %s", (user_id,))
-        return await cur.fetchone()
+        row = await cur.fetchone()
+    if created:                                     # a new account gets its welcome email, once
+        from . import notify
+        notify._later(notify.welcome(user_id))
+    return row
 
 
 async def for_user(user: AuthUser) -> dict:

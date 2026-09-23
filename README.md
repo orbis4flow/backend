@@ -11,7 +11,8 @@ In the Supabase SQL editor, run in order, then check:
 1. `sql/001_schema.sql`
 2. `sql/002_security.sql`
 3. `sql/003_trades.sql`
-4. `sql/admin/check_setup.sql`: every row should read `ok`
+4. `sql/004_notifications_usdt_referrals.sql`
+5. `sql/admin/check_setup.sql`: every row should read `ok`
 
 See `sql/README.md` for the admin queries (withdrawal review, lookups, verifying methods).
 
@@ -72,7 +73,42 @@ Set the webhook URL in Paystack → Settings → API Keys & Webhooks: `https://<
 
 Dollar amounts are charged in `PAYSTACK_CURRENCY` (KES), converted at `USD_KES_RATE`. The card number never reaches orbisflow. A card that pays successfully is saved as a verified payment method.
 
-## 6 · Withdrawals are manual
+## 6 · Email (Resend) and SMS (Africa's Talking)
+
+Optional: without keys the API still works and records each message as skipped in `app.notifications`.
+
+| Variable | |
+|---|---|
+| `RESEND_API_KEY` | resend.com → API Keys |
+| `EMAIL_FROM` | a sender on a domain you have verified in Resend (Domains → add, then the DNS records), e.g. `orbisflow <no-reply@orbisflow.com>`. Until a domain is verified Resend only delivers to your own address. |
+| `SUPPORT_EMAIL` | where replies go; default `support@orbisflow.com` |
+| `AT_USERNAME`, `AT_API_KEY` | africastalking.com → your app → Settings → API Key. Use `sandbox` as the username to test in their simulator. |
+| `AT_SENDER_ID` | an approved alphanumeric sender ID (optional; without one Safaricom shows a shared short code) |
+
+Sent: a welcome email; deposit received (email and SMS); withdrawal requested (email and SMS); a new payment method (email); referral earnings paid (email and SMS). SMS goes to the phone number on the profile.
+
+Supabase's own emails (sign-up confirmation, password reset) come from Supabase. To send those through Resend too: Supabase → Authentication → Emails → SMTP settings, host `smtp.resend.com`, port 465, user `resend`, password your Resend API key.
+
+## 7 · Market news and the economic calendar
+
+- News: `FINNHUB_API_KEY`, a free key from finnhub.io (60 calls a minute; the API caches for five minutes, so a busy site uses a handful an hour).
+- Calendar: the ForexFactory weekly feed, no key. Cached for an hour. It carries forecast and previous figures but no actuals.
+
+## 8 · Automatic USDT deposits
+
+Free, on TronGrid. A deposit request gets its own exact amount (50.37 USDT for a $50 request), and a confirmed TRC-20 transfer of exactly that amount to `USDT_DEPOSIT_ADDRESS` credits it, once. The API looks every 30 seconds while a request is open, and whenever the user's screen asks. A transfer that matches nothing (a wrong amount, a late payment) is kept in `app.webhook_events` with provider `tron` for you to credit by hand.
+
+| Variable | |
+|---|---|
+| `USDT_DEPOSIT_ADDRESS` | **your** TRON wallet address. The default is the one that was in the UI; make sure it is a wallet orbisflow controls. |
+| `TRONGRID_API_KEY` | optional, free at trongrid.io; raises the rate limit |
+| `USDT_REQUEST_MINUTES` | how long a request stays open, default 120 |
+
+## 9 · Referral earnings
+
+Counted hourly, per referrer per week (Monday to Sunday, Nairobi time): their referrals' real-money stakes x `REFERRAL_SPREAD_PCT` (default 0.75) x their tier (20, 28 or 35%, by referrals who traded real money in the last 30 days). A finished week is paid into the referrer's real balance from the Thursday after, as a `referral` transaction, with an email and SMS. Demo trades earn nothing, so this stays at zero until real-money trading opens.
+
+## 10 · Withdrawals are manual
 
 A withdrawal takes the amount plus the fee from the balance at once and waits in review. Pay it yourself (M-Pesa, bank or USDT), then record it with `sql/admin/withdrawals.sql`: approve with your receipt, or reject, which refunds the whole amount. For M-Pesa, `local_amount` is the KSh to send.
 
@@ -122,6 +158,9 @@ All JSON. Signed-in routes take `Authorization: Bearer <access_token>`. Errors a
 | GET | `/trades/open`, `/trades/closed`, `/trades/stats` | positions and their breakdown |
 | GET | `/reports/profit`, `/confirmations` | the profit table and trade confirmations pages |
 | POST | `/accounts/demo/reset` | tops the demo balance back up to $10,000 once nothing is open on it |
+| POST | `/payments/deposit/usdt` | `{amount_usd}` → `{address, amountUsdt, expiresAt, reference}`: the exact amount to send |
+| GET | `/news`, `/calendar?range=today\|tomorrow\|week` | market news and the economic calendar (public) |
+| GET | `/referrals/earnings` | weeks, paid and pending |
 | POST | `/webhooks/payhero`, `/webhooks/paystack` | provider callbacks |
 | GET | `/health` | database and provider readiness |
 
@@ -150,8 +189,5 @@ In the order they unblock the most:
 
 1. **A server-side price feed, then real-money trading.** Prices and settlement have to come from the server before a real balance can be staked: the backend records the entry and exit itself instead of trusting the browser. Crypto from Binance's public WebSocket, forex and metals from a provider such as Twelve Data, Finnhub or OANDA, and the synthetic indices generated on the server. The UI chart then draws from the same feed.
 2. **Identity verification.** The verification page runs locally. Smile ID (built for African IDs, including Kenyan national ID and KRA PIN) or Sumsub, with their webhook setting a verified flag that withdrawals check.
-3. **USDT deposits.** The address flow ends on "I have sent it". TronGrid watching the deposit address for incoming TRC-20 USDT would credit it automatically.
-4. **Automated payouts.** Withdrawals are manual. Paystack Transfers can pay Kenyan bank accounts and M-Pesa from the Paystack balance you already hold.
-5. **Email and SMS.** Receipts for deposits, withdrawal status, password and security notices: Resend or Postmark for email, Africa's Talking for SMS.
-6. **Referral earnings.** Now that trades are recorded, a weekly job can compute each referrer's share of the spread and fill `/referrals/earnings`.
-7. **Market news and the economic calendar.** Finnhub or Financial Modeling Prep serve both.
+3. **Automated payouts.** Withdrawals are manual. Paystack Transfers can pay Kenyan bank accounts and M-Pesa from the Paystack balance you already hold.
+4. **Withdrawal status emails.** Approving or rejecting a withdrawal is an SQL query today, so it sends nothing; a small admin endpoint for it could email the user.
