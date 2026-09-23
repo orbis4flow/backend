@@ -107,6 +107,22 @@ async def get_user(token: str) -> dict:
     return await _call("GET", "/user", token=token)
 
 
+_providers: tuple[float, dict] | None = None
+
+
+async def provider_enabled(provider: str) -> bool:
+    """Whether a sign-in provider is switched on in Supabase (checked once a minute)."""
+    global _providers
+    import time
+    if _providers is None or _providers[0] < time.monotonic():
+        try:
+            r = await client().get("/settings")
+            _providers = (time.monotonic() + 60, (r.json() or {}).get("external") or {})
+        except (httpx.HTTPError, ValueError):
+            return True          # cannot tell: let Supabase answer for itself
+    return bool(_providers[1].get(provider))
+
+
 def oauth_url(provider: str, redirect_to: str) -> str:
     s = get_settings()
     return str(httpx.URL(f"{s.supabase_url}/auth/v1/authorize",

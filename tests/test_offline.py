@@ -105,7 +105,18 @@ def test_validation_is_one_sentence():
     assert isinstance(r.json()["detail"], str)
 
 
-def test_google_url_points_back_to_login():
+def test_google_off_says_so(monkeypatch):
+    async def off(provider):
+        return False
+    monkeypatch.setattr(auth_router.supabase_auth, "provider_enabled", off)
+    r = client.get("/auth/google")
+    assert r.status_code == 503 and "Google" in r.json()["detail"]
+
+
+def test_google_url_points_back_to_login(monkeypatch):
+    async def on(provider):
+        return True
+    monkeypatch.setattr(auth_router.supabase_auth, "provider_enabled", on)
     url = client.get("/auth/google", params={"ref": "orbis-abcde"}).json()["url"]
     assert "/auth/v1/authorize" in url and "provider=google" in url
     assert "ORBIS-ABCDE" in url

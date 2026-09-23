@@ -108,6 +108,8 @@ async def update_password(body: NewPassword, user: AuthUser = Depends(current_us
 async def google(ref: str | None = None):
     """Where to send the browser for Google sign-in. Supabase sends it back to
     /login with the session in the URL fragment."""
+    if not await supabase_auth.provider_enabled("google"):
+        raise HTTPException(status_code=503, detail="Google sign-in is not switched on yet. Use your email for now.")
     s = get_settings()
     back = f"{s.frontend_url}/login?oauth=google" + (f"&ref={ref.strip().upper()}" if ref else "")
     return {"url": supabase_auth.oauth_url("google", back)}

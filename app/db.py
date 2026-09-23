@@ -75,3 +75,30 @@ async def run(sql: str, params: Any = None, conn: AsyncConnection | None = None)
     async with tx() as c:
         cur = await c.execute(sql, params)
         return cur.rowcount
+
+
+async def diagnose(err: Exception) -> str:
+    """Why the database is unreachable, in words, without the address or password.
+    A pool timeout hides the cause, so one direct connection is tried to find it."""
+    from psycopg import errors
+
+    if isinstance(err, errors.UndefinedTable) or "does not exist" in str(err):
+        return "connected, but the app tables are missing: run sql/001_schema.sql"
+    try:
+        conn = await AsyncConnection.connect(get_settings().database_url, connect_timeout=10)
+        await conn.close()
+        return f"reachable now, earlier error: {type(err).__name__}"
+    except Exception as e:
+        m = str(e).lower()
+        for needle, why in (
+            ("password authentication failed", "password rejected: check the password in DATABASE_URL"),
+            ("tenant or user not found", "pooler user not found: the user must be postgres.<project-ref>"),
+            ("could not translate host name", "host name not found: check the host in DATABASE_URL"),
+            ("network is unreachable", "host unreachable: use the Session pooler string, not the direct db. host"),
+            ("timeout", "connection timed out: use the Session pooler string, not the direct db. host"),
+            ("invalid dsn", "DATABASE_URL is not a valid connection string (encode special characters in the password)"),
+            ("missing", "DATABASE_URL is not a valid connection string"),
+        ):
+            if needle in m:
+                return "error: " + why
+        return f"error: {type(e).__name__}"

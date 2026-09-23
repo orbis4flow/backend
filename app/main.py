@@ -79,7 +79,7 @@ async def health():
     try:
         await db.one("select 1 from app.profiles limit 1")
         database = "ok"
-    except Exception as e:                              # most often: the SQL files have not been run yet
-        database = f"error: {type(e).__name__}"
+    except Exception as e:
+        database = await db.diagnose(e)
     return {"ok": database == "ok", "database": database,
             "payhero": s.payhero_ready, "paystack": s.paystack_ready}
