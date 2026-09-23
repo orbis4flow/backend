@@ -93,6 +93,8 @@ async def diagnose(err: Exception) -> str:
         for needle, why in (
             ("password authentication failed", "password rejected: check the password in DATABASE_URL"),
             ("tenant or user not found", "pooler user not found: the user must be postgres.<project-ref>"),
+            ("failed to resolve host", "host name not found: if the password has @ # / : ? or %, percent-encode it "
+                                       "(@ is %40) or reset it to letters and numbers"),
             ("could not translate host name", "host name not found: check the host in DATABASE_URL"),
             ("network is unreachable", "host unreachable: use the Session pooler string, not the direct db. host"),
             ("timeout", "connection timed out: use the Session pooler string, not the direct db. host"),
@@ -108,7 +110,9 @@ def _scrub(msg: str) -> str:
     """The driver's own words, with anything that locates or unlocks the database removed."""
     import re
     msg = re.sub(r"postgres(ql)?://\S+", "<url>", msg)
-    msg = re.sub(r'"[^"]*"', '"<host>"', msg)                        # quoted hosts and addresses
+    msg = re.sub(r'"[^"]*"', '"<hidden>"', msg)                      # anything quoted can hold a host or a
+    msg = re.sub(r"'[^']*'", "'<hidden>'", msg)                      # piece of a mistyped password
+    msg = re.sub(r"\S*@\S*", "<hidden>", msg)
     msg = re.sub(r"\b\d{1,3}(\.\d{1,3}){3}\b", "<ip>", msg)
     msg = re.sub(r"\b[0-9a-f]{1,4}(:[0-9a-f]{0,4}){2,7}\b", "<ip>", msg)   # IPv6
     msg = re.sub(r"[\w.-]+\.(supabase\.(co|com)|amazonaws\.com)", "<host>", msg)
