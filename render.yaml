@@ -1,0 +1,35 @@
+# Render blueprint: New → Blueprint → pick this repository.
+# Only what differs per deployment is here. Everything else (Supabase URL and
+# publishable key, the money rules, KES as Paystack's currency) has a default
+# in app/config.py and can still be overridden by adding the variable in Render.
+# Python's version comes from .python-version.
+services:
+  - type: web
+    name: orbisflow-api
+    runtime: python
+    region: frankfurt            # closest Render region to Nairobi
+    plan: starter                # the free plan sleeps, and a sleeping API misses payment callbacks
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # Supabase → Connect → Session pooler, with your database password
+      - key: DATABASE_URL
+        sync: false
+      # the UI's address: links in emails, referral links, returns from Paystack, CORS
+      - key: FRONTEND_URL
+        sync: false
+      # PayHero → API Keys, and the payment channel id
+      - key: PAYHERO_API_USERNAME
+        sync: false
+      - key: PAYHERO_API_PASSWORD
+        sync: false
+      - key: PAYHERO_CHANNEL_ID
+        sync: false
+      # Paystack → Settings → API Keys & Webhooks: the secret key
+      - key: PAYSTACK_SECRET_KEY
+        sync: false
+      # guards the PayHero callback URL; Render makes a long random value
+      - key: PAYHERO_CALLBACK_TOKEN
+        generateValue: true
