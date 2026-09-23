@@ -1,11 +1,14 @@
 """Account creation and sign-in, relayed to Supabase Auth."""
-from fastapi import APIRouter, Depends, HTTPException
+import jwt
+from fastapi import APIRouter, Depends, HTTPException, Request
+from psycopg.errors import UndefinedTable
 from pydantic import BaseModel, EmailStr, Field
 
 from .. import supabase_auth
 from ..config import get_settings
-from ..security import AuthUser, bearer, current_user
-from ..services import profiles
+from .. import db
+from ..security import AuthUser, bearer, current_user, pending_user
+from ..services import otp, profiles, sessions
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -28,6 +31,10 @@ class Refresh(BaseModel):
 
 class Forgot(BaseModel):
     email: EmailStr
+
+
+class Code(BaseModel):
+    code: str = Field(min_length=4, max_length=12)
 
 
 class NewPassword(BaseModel):
@@ -73,9 +80,29 @@ async def sign_up(body: SignUp):
     return {"confirm_email": True, "email": body.email}
 
 
+async def _second_factor(out: dict, request: Request) -> dict:
+    """With two-factor on, the session just made cannot be used until its code
+    is entered: the code goes out now, and the UI is told to ask for it."""
+    claims = jwt.decode(out["access_token"], options={"verify_signature": False})
+    uid, sid = claims.get("sub"), claims.get("session_id")
+    try:
+        prefs = await db.one("select twofa_enabled, twofa_channel from app.preferences where user_id = %s", (uid,))
+    except UndefinedTable:
+        return out
+    if not (prefs and prefs["twofa_enabled"]):
+        return out
+    await sessions.check(uid, sid, request, allow_pending=True)
+    out["otp_required"] = True
+    try:
+        out["otp"] = await otp.issue(uid, "login", prefs["twofa_channel"] or "email", sid)
+    except HTTPException as e:
+        out["otp"] = {"error": e.detail}
+    return out
+
+
 @router.post("/login")
-async def sign_in(body: SignIn):
-    return await _session(await supabase_auth.sign_in(body.email, body.password))
+async def sign_in(body: SignIn, request: Request):
+    return await _second_factor(await _session(await supabase_auth.sign_in(body.email, body.password)), request)
 
 
 @router.post("/refresh")
@@ -86,6 +113,31 @@ async def refresh(body: Refresh):
 @router.post("/logout", status_code=204)
 async def sign_out(token: str = Depends(bearer)):
     await supabase_auth.sign_out(token)
+    try:
+        sid = jwt.decode(token, options={"verify_signature": False}).get("session_id")
+        if sid:
+            await db.run("update app.sessions set revoked_at = now() where id = %s and revoked_at is null", (sid,))
+            sessions.forget(sid)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------- two-factor sign-in --
+@router.post("/2fa/send")
+async def send_login_code(user: AuthUser = Depends(pending_user)):
+    """Send (or send again) the code that finishes signing this session in."""
+    prefs = await db.one("select twofa_enabled, twofa_channel from app.preferences where user_id = %s", (user.id,))
+    if not (prefs and prefs["twofa_enabled"]):
+        raise HTTPException(status_code=400, detail="Two-factor sign-in is not on for this account.")
+    return await otp.issue(user.id, "login", prefs["twofa_channel"] or "email", user.session_id)
+
+
+@router.post("/2fa/verify")
+async def verify_login_code(body: Code, user: AuthUser = Depends(pending_user)):
+    await otp.check(user.id, "login", body.code, user.session_id)
+    if user.session_id:
+        await sessions.mark_verified(user.session_id)
+    return {"verified": True}
 
 
 @router.post("/password/forgot", status_code=204)

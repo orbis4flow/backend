@@ -23,6 +23,7 @@ class AuthUser:
     email: str
     token: str
     meta: dict = field(default_factory=dict)
+    session_id: str | None = None          # Supabase's session, one per signed-in device
 
 
 _jwks: jwt.PyJWKClient | None = None
@@ -45,7 +46,7 @@ def _jwks_client() -> jwt.PyJWKClient:
 
 def _from_claims(claims: dict, token: str) -> AuthUser:
     return AuthUser(id=claims["sub"], email=claims.get("email") or "", token=token,
-                    meta=claims.get("user_metadata") or {})
+                    meta=claims.get("user_metadata") or {}, session_id=claims.get("session_id"))
 
 
 async def verify(token: str) -> AuthUser:
@@ -78,7 +79,10 @@ async def verify(token: str) -> AuthUser:
         u = await supabase_auth.get_user(token)
     except HTTPException:
         raise HTTPException(status_code=401, detail="Your session has ended. Log in again.")
-    user = AuthUser(id=u["id"], email=u.get("email") or "", token=token, meta=u.get("user_metadata") or {})
+    # Supabase vouched for the token, so its claims can be read for the session id
+    sid = jwt.decode(token, options={"verify_signature": False}).get("session_id")
+    user = AuthUser(id=u["id"], email=u.get("email") or "", token=token, meta=u.get("user_metadata") or {},
+                    session_id=sid)
     if len(_remote_cache) > 5000:
         _remote_cache.clear()
     _remote_cache[digest] = (time.monotonic() + _REMOTE_TTL, user)
@@ -92,5 +96,19 @@ def bearer(request: Request) -> str:
     return auth[7:].strip()
 
 
-async def current_user(token: str = Depends(bearer)) -> AuthUser:
-    return await verify(token)
+async def current_user(request: Request, token: str = Depends(bearer)) -> AuthUser:
+    """A signed-in user on a session that is not revoked and, with two-factor
+    on, has entered its code."""
+    from .services import sessions
+    user = await verify(token)
+    await sessions.check(user.id, user.session_id, request)
+    return user
+
+
+async def pending_user(request: Request, token: str = Depends(bearer)) -> AuthUser:
+    """The same, but let through while the two-factor code is still owed: for
+    sending that code, checking it, and signing out."""
+    from .services import sessions
+    user = await verify(token)
+    await sessions.check(user.id, user.session_id, request, allow_pending=True)
+    return user

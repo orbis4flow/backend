@@ -88,9 +88,10 @@ async def refresh(refresh_token: str) -> dict:
                        json={"refresh_token": refresh_token})
 
 
-async def sign_out(token: str) -> None:
+async def sign_out(token: str, scope: str = "local") -> None:
+    """scope: local (this session), others (every other session), global (all)."""
     try:
-        await _call("POST", "/logout", token=token)
+        await _call("POST", "/logout", token=token, params={"scope": scope})
     except HTTPException:
         pass  # an already-dead session is still signed out
 

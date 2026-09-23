@@ -94,7 +94,8 @@ def test_rates_reflect_the_rules():
 
 def test_signed_in_routes_need_a_token():
     for path in ("/me", "/accounts", "/payment-methods", "/referrals/link", "/transactions",
-                 "/trades/open", "/trades/closed", "/trades/stats", "/reports/profit", "/confirmations"):
+                 "/trades/open", "/trades/closed", "/trades/stats", "/reports/profit", "/confirmations",
+                 "/preferences", "/sessions"):
         r = client.get(path)
         assert r.status_code == 401, path
         assert r.json()["detail"]
@@ -221,3 +222,47 @@ def test_market_routes_are_public_and_empty_without_data(monkeypatch):
     monkeypatch.setattr(market, "_fetch_calendar", nothing)
     assert client.get("/news").json() is None
     assert client.get("/calendar", params={"range": "week"}).json() is None
+
+
+
+# ------------------------------------------------ preferences and security --
+def test_security_routes_need_a_token():
+    for method, path, body in [("post", "/security/password", {"current_password": "a", "new_password": "longenough"}),
+                               ("post", "/security/2fa/start", {"channel": "email"}),
+                               ("post", "/auth/2fa/verify", {"code": "123456"}),
+                               ("post", "/auth/2fa/send", None),
+                               ("post", "/sessions/revoke-others", None),
+                               ("put", "/preferences/limits", {"deposit_daily": 100})]:
+        r = getattr(client, method)(path, json=body) if body is not None else getattr(client, method)(path)
+        assert r.status_code == 401, path
+
+
+def test_codes_are_hashed_salted_and_masked():
+    from app.services.otp import _hash, mask
+    assert _hash("aa", "123456") != _hash("bb", "123456")
+    assert len(_hash("aa", "123456")) == 64
+    assert mask("email", "amara@mail.com") == "am•••@mail.com"
+    assert mask("sms", "+254712345412") == "+254•••412"
+
+
+def test_devices_are_named_from_the_browser():
+    from app.services.sessions import device_of
+    assert device_of("Mozilla/5.0 (Windows NT 10.0) AppleWebKit Chrome/140 Safari/537") == "Chrome · Windows"
+    assert device_of("Mozilla/5.0 (iPhone; CPU iPhone OS 18) AppleWebKit Version/18 Mobile Safari/604") == "Safari · iOS"
+    assert device_of("") == "Browser"
+
+
+def test_pause_rules(monkeypatch):
+    from app.routers import account
+    from app import security
+    async def fake_user(token):
+        return security.AuthUser(id="u1", email="a@b.co", token=token)
+    async def no_check(*a, **k):
+        return None
+    monkeypatch.setattr(security, "verify", fake_user)
+    monkeypatch.setattr("app.services.sessions.check", no_check)
+    h = {"Authorization": "Bearer x"}
+    r = client.post("/preferences/pause", json={"kind": "cooling_off", "days": 60}, headers=h)
+    assert r.status_code == 400 and "42 days" in r.json()["detail"]
+    r = client.post("/preferences/pause", json={"kind": "self_exclusion", "days": 30}, headers=h)
+    assert r.status_code == 400 and "six months" in r.json()["detail"]

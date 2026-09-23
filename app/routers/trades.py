@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 from .. import db
 from ..config import get_settings
 from ..security import AuthUser, current_user
-from ..services import profiles
+from ..services import limits, profiles
 from ..util import code, show_date, usd
 
 router = APIRouter(tags=["trading"])
@@ -148,6 +148,7 @@ async def place(body: Place, user: AuthUser = Depends(current_user)):
     if stake < MIN_STAKE or stake > MAX_STAKE:
         raise HTTPException(status_code=400, detail=f"Stake must be between ${MIN_STAKE} and ${MAX_STAKE:,}.")
     entry = _price(body.entry_price)
+    await limits.can_trade(user.id, body.account, stake)
 
     async with db.tx() as conn:
         cur = await conn.execute(

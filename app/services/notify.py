@@ -72,10 +72,11 @@ def _page(title: str, lines: list[str], rows: list[tuple[str, str]] | None = Non
         '</td></tr></table></td></tr></table></body></html>')
 
 
-async def _send_email(user_id, kind, to, subject, html_body, text) -> None:
+async def _send_email(user_id, kind, to, subject, html_body, text) -> bool:
     s = get_settings()
     if not s.email_ready or not to:
-        return await _record(user_id, "email", kind, to or "-", subject, "skipped", error="RESEND_API_KEY not set")
+        await _record(user_id, "email", kind, to or "-", subject, "skipped", error="RESEND_API_KEY not set")
+        return False
     try:
         async with httpx.AsyncClient(timeout=20) as c:
             r = await c.post("https://api.resend.com/emails",
@@ -85,9 +86,11 @@ async def _send_email(user_id, kind, to, subject, html_body, text) -> None:
         if r.status_code >= 400:
             raise RuntimeError(f"Resend {r.status_code}: {r.text[:200]}")
         await _record(user_id, "email", kind, to, subject, "sent", provider_id=(r.json() or {}).get("id"))
+        return True
     except Exception as e:
         log.warning("email %s to %s failed: %s", kind, to, e)
         await _record(user_id, "email", kind, to, subject, "failed", error=str(e))
+        return False
 
 
 def email(user_id, kind: str, to: str, subject: str, title: str, lines: list[str],
@@ -98,10 +101,11 @@ def email(user_id, kind: str, to: str, subject: str, title: str, lines: list[str
 
 
 # --------------------------------------------------------------------- SMS --
-async def _send_sms(user_id, kind, to, message) -> None:
+async def _send_sms(user_id, kind, to, message) -> bool:
     s = get_settings()
     if not s.sms_ready or not to:
-        return await _record(user_id, "sms", kind, to or "-", None, "skipped", error="Africa's Talking not configured")
+        await _record(user_id, "sms", kind, to or "-", None, "skipped", error="Africa's Talking not configured")
+        return False
     base = ("https://api.sandbox.africastalking.com" if s.at_username == "sandbox"
             else "https://api.africastalking.com")
     form = {"username": s.at_username, "to": to, "message": message}
@@ -116,9 +120,11 @@ async def _send_sms(user_id, kind, to, message) -> None:
         if r.status_code >= 400 or str(rec.get("status", "")).lower() not in ("success", "sent"):
             raise RuntimeError(f"Africa's Talking {r.status_code}: {rec.get('status') or r.text[:200]}")
         await _record(user_id, "sms", kind, to, None, "sent", provider_id=rec.get("messageId"))
+        return True
     except Exception as e:
         log.warning("sms %s to %s failed: %s", kind, to, e)
         await _record(user_id, "sms", kind, to, None, "failed", error=str(e))
+        return False
 
 
 def sms(user_id, kind: str, to: str | None, message: str) -> None:
@@ -199,3 +205,54 @@ async def referral_paid(user_id, amount, period: str) -> None:
           "Your referral earnings are in", [f"{_money(amount)} for {html.escape(period)} is now in your real balance."],
           button=("See earnings", f"{s.frontend_url}/referral-earnings"))
     sms(p["id"], "referral_paid", p["phone"], f"orbisflow: referral earnings of {_money(amount)} paid to your balance.")
+
+
+
+# ------------------------------------------------------- sent and awaited --
+async def code_now(user_id, channel: str, to: str, code: str, purpose_text: str) -> bool:
+    """A one-time code, sent while the caller waits: it has to know whether it
+    went, because the person on the other end is waiting for it."""
+    if channel == "sms":
+        return await _send_sms(user_id, "otp", to, f"orbisflow code: {code}. It {purpose_text} and expires "
+                                                    "in 10 minutes. Never share it with anyone.")
+    lines = [f"Your code is <b style=\"font-size:22px;letter-spacing:4px;font-family:Consolas,monospace\">{code}</b>",
+             f"It {html.escape(purpose_text)} and expires in 10 minutes.",
+             "orbisflow will never ask you for this code. If you did not ask for it, change your password."]
+    text = f"Your orbisflow code is {code}. It {purpose_text} and expires in 10 minutes."
+    # the code stays out of the subject: subjects are kept in app.notifications
+    return await _send_email(user_id, "otp", to, "Your orbisflow code", _page("Your code", lines), text)
+
+
+async def login_alert(user_id, device: str, ip: str | None) -> None:
+    p = await _person(user_id)
+    if not p:
+        return
+    s = get_settings()
+    email(p["id"], "login_alert", p["email"], "New sign-in to your orbisflow account",
+          "A new device signed in",
+          [f"Your account was just opened on <b>{html.escape(device or 'a new device')}</b>.",
+           "If this was you, there is nothing to do. If not, sign that session out and change your password now."],
+          [("Device", device or "Unknown"), ("IP address", ip or "Unknown")],
+          ("Review sessions", f"{s.frontend_url}/security"))
+
+
+async def password_changed(user_id) -> None:
+    p = await _person(user_id)
+    if not p:
+        return
+    email(p["id"], "password_changed", p["email"], "Your orbisflow password was changed",
+          "Password changed",
+          ["The password on your account was just changed, and every other device was signed out.",
+           "If you did not do this, reset your password straight away and contact support."])
+
+
+async def twofa_changed(user_id, on: bool, channel: str | None) -> None:
+    p = await _person(user_id)
+    if not p:
+        return
+    how = "a text message" if channel == "sms" else "email"
+    email(p["id"], "twofa_changed", p["email"],
+          "Two-factor sign-in turned " + ("on" if on else "off"),
+          "Two-factor sign-in " + ("is on" if on else "is off"),
+          [f"Signing in now also needs a code sent by {how}." if on else
+           "Signing in no longer needs a code. If you did not turn this off, contact support at once."])

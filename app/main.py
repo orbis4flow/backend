@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from . import db, supabase_auth
 from .services import referrals as referral_jobs, tron
 from .config import get_settings
-from .routers import auth, market, me, payment_methods, payments, referrals, trades, webhooks
+from .routers import account, auth, market, me, payment_methods, payments, referrals, trades, webhooks
 
 # psycopg's async driver needs the selector loop on Windows (local dev only)
 if sys.platform == "win32":
@@ -53,8 +53,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_list,
     allow_credentials=False,                            # auth travels in the Authorization header
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
+    expose_headers=["X-Orbis-Otp"],                      # says which code a 428 is asking for
     max_age=600,
 )
 
@@ -77,7 +78,7 @@ async def unexpected(_: Request, exc: Exception):
 
 
 for r in (auth.router, me.router, payment_methods.router, referrals.router, payments.router, trades.router,
-          market.router, webhooks.router):
+          market.router, account.router, webhooks.router):
     app.include_router(r)
 
 
@@ -103,6 +104,14 @@ async def health():
             extras = "ok"
         except Exception:                               # sql/004 not run yet
             extras = "run sql/004_notifications_usdt_referrals.sql"
+    security = "unknown"
+    if database == "ok":
+        try:
+            await db.one("select 1 from app.sessions limit 1")
+            security = "ok"
+        except Exception:                               # sql/005 not run yet
+            security = "run sql/005_preferences_security.sql"
     return {"ok": database == "ok", "database": database, "trading": trading, "notifications_usdt_referrals": extras,
+            "preferences_security": security,
             "payhero": s.payhero_ready, "paystack": s.paystack_ready,
             "email": s.email_ready, "sms": s.sms_ready, "news": bool(s.finnhub_api_key)}

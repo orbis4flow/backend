@@ -12,7 +12,8 @@ In the Supabase SQL editor, run in order, then check:
 2. `sql/002_security.sql`
 3. `sql/003_trades.sql`
 4. `sql/004_notifications_usdt_referrals.sql`
-5. `sql/admin/check_setup.sql`: every row should read `ok`
+5. `sql/005_preferences_security.sql`
+6. `sql/admin/check_setup.sql`: every row should read `ok`
 
 See `sql/README.md` for the admin queries (withdrawal review, lookups, verifying methods).
 
@@ -108,7 +109,16 @@ Free, on TronGrid. A deposit request gets its own exact amount (50.37 USDT for a
 
 Counted hourly, per referrer per week (Monday to Sunday, Nairobi time): their referrals' real-money stakes x `REFERRAL_SPREAD_PCT` (default 0.75) x their tier (20, 28 or 35%, by referrals who traded real money in the last 30 days). A finished week is paid into the referrer's real balance from the Thursday after, as a `referral` transaction, with an email and SMS. Demo trades earn nothing, so this stays at zero until real-money trading opens.
 
-## 10 · Withdrawals are manual
+## 10 · Preferences, two-factor and devices
+
+- **Preferences** (`/preferences`): default stake and duration (the Trade page starts from them), confirm-before-trade, login alerts, settlement and marketing email opt-ins. The last two are stored for when those messages exist; nothing sends them yet.
+- **Two-factor sign-in**: a 6-digit code by email or SMS. With it on, signing in still returns a session, but every request from that session is refused with `428` (header `X-Orbis-Otp: login`) until `/auth/2fa/verify` accepts the code, so tokens are never held on the server and a stolen password alone opens nothing. Codes are stored hashed and salted, live 10 minutes, die after 5 wrong tries, and cannot be requested more than once in 45 seconds or 6 times an hour.
+- **Withdrawal confirmation** (on by default): a withdrawal needs a code sent to the account's email (or SMS, if two-factor uses SMS). Until an email or SMS provider is configured the code step is skipped, since withdrawals wait for manual review anyway.
+- **Devices** (`/sessions`): every Supabase session is recorded with its device and IP. Revoking one refuses it at once; "sign out all" also ends every other session's refresh token at Supabase. A new device triggers a login-alert email.
+- **Password change** needs the current password, signs out every other device, and emails the user.
+- **Responsible trading**: a daily deposit cap and a daily loss limit (real money), a cooling-off pause of 1 to 42 days (no trading), and self-exclusion of six months or more (no trading, no deposits). Pauses cannot be shortened. All are enforced by the API, not only shown.
+
+## 11 · Withdrawals are manual
 
 A withdrawal takes the amount plus the fee from the balance at once and waits in review. Pay it yourself (M-Pesa, bank or USDT), then record it with `sql/admin/withdrawals.sql`: approve with your receipt, or reject, which refunds the whole amount. For M-Pesa, `local_amount` is the KSh to send.
 
@@ -161,6 +171,17 @@ All JSON. Signed-in routes take `Authorization: Bearer <access_token>`. Errors a
 | POST | `/payments/deposit/usdt` | `{amount_usd}` → `{address, amountUsdt, expiresAt, reference}`: the exact amount to send |
 | GET | `/news`, `/calendar?range=today\|tomorrow\|week` | market news and the economic calendar (public) |
 | GET | `/referrals/earnings` | weeks, paid and pending |
+| POST | `/auth/2fa/send`, `/auth/2fa/verify` | the sign-in code for a session that owes one |
+| GET · PATCH | `/preferences` | the Preferences page |
+| PUT | `/preferences/limits` | `{deposit_daily, loss_daily}`, null for no limit |
+| POST | `/preferences/pause` | `{kind: cooling_off\|self_exclusion, days}` |
+| POST | `/security/password` | `{current_password, new_password}` |
+| POST | `/security/2fa/start`, `/security/2fa/enable` | `{channel}` then `{code}` |
+| POST | `/security/2fa/disable/start`, `/security/2fa/disable` | then `{code}` |
+| PUT | `/security/withdrawal-confirm` | `{enabled}` |
+| GET | `/sessions` | signed-in devices |
+| DELETE | `/sessions/{id}` | sign one device out |
+| POST | `/sessions/revoke-others` | sign every other device out |
 | POST | `/webhooks/payhero`, `/webhooks/paystack` | provider callbacks |
 | GET | `/health` | database and provider readiness |
 

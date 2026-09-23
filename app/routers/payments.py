@@ -7,6 +7,7 @@ refunds) with sql/admin/withdrawals.sql.
 Limits: deposits from MIN_DEPOSIT_USD, withdrawals from MIN_WITHDRAW_USD
 with WITHDRAW_FEE_USD charged on top of the amount.
 """
+import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -19,7 +20,7 @@ from ..config import get_settings
 from ..security import AuthUser, current_user
 from psycopg.errors import UniqueViolation
 
-from ..services import ledger, notify, payhero, paystack, profiles, settle, tron
+from ..services import ledger, limits, notify, otp, payhero, paystack, profiles, settle, tron
 from ..util import kenyan_msisdn, kes_down, kes_up, mask_phone, reference, show_date, usd
 from .payment_methods import upsert_mpesa
 
@@ -49,6 +50,7 @@ class UsdtDeposit(BaseModel):
 class Withdrawal(BaseModel):
     amount_usd: float = Field(gt=0)
     payment_method_id: str
+    otp_code: str | None = Field(default=None, max_length=12)
 
 
 def public(t: dict) -> dict:
@@ -110,6 +112,7 @@ async def deposit_mpesa(body: MpesaDeposit, user: AuthUser = Depends(current_use
         raise HTTPException(status_code=503, detail="M-Pesa deposits are not switched on yet.")
     p = await profiles.for_user(user)
     amount = _deposit_amount(body.amount_usd)
+    await limits.can_deposit(user.id, amount)
 
     if body.payment_method_id:
         m = await db.one(
@@ -155,6 +158,7 @@ async def deposit_card(body: CardDeposit, user: AuthUser = Depends(current_user)
         raise HTTPException(status_code=503, detail="Card deposits are not switched on yet.")
     p = await profiles.for_user(user)
     amount = _deposit_amount(body.amount_usd)
+    await limits.can_deposit(user.id, amount)
     fee = usd(amount * Decimal(str(s.card_fee_pct)) / 100)
     currency = s.paystack_currency.upper()
     if currency == "USD":
@@ -195,6 +199,7 @@ async def deposit_usdt(body: UsdtDeposit, user: AuthUser = Depends(current_user)
     s = get_settings()
     await profiles.for_user(user)
     base = _deposit_amount(body.amount_usd)
+    await limits.can_deposit(user.id, base + 1)          # the exact amount can be up to 99 cents more
     for _ in range(12):
         exact = tron.exact_amount(base)
         ref = reference("DP")
@@ -218,6 +223,31 @@ async def deposit_usdt(body: UsdtDeposit, user: AuthUser = Depends(current_user)
 
 
 # ------------------------------------------------------------ withdrawals --
+async def _confirm_withdrawal(user: AuthUser, code: str | None) -> None:
+    """With withdrawal confirmation on (the default), a withdrawal needs a code
+    sent to the account's own email or phone. Asked without one, the code goes
+    out and the answer is 428, which the UI turns into a code box."""
+    try:
+        p = await db.one("select withdrawal_confirm, twofa_enabled, twofa_channel from app.preferences "
+                         "where user_id = %s", (user.id,))
+    except Exception:                                   # sql/005 not run yet
+        return
+    if p is not None and not p["withdrawal_confirm"]:
+        return
+    channel = (p and p["twofa_enabled"] and p["twofa_channel"]) or "email"
+    s = get_settings()
+    if not (s.sms_ready if channel == "sms" else s.email_ready):
+        # no way to deliver a code yet (no Resend / Africa's Talking key): the
+        # withdrawal still waits for manual review, so it goes ahead
+        logging.getLogger("orbisflow.payments").warning("withdrawal code skipped: no %s provider", channel)
+        return
+    if not code:
+        sent = await otp.issue(user.id, "withdrawal", channel)
+        raise HTTPException(status_code=428, detail=f"Enter the code we sent to {sent['to']} to confirm this withdrawal.",
+                            headers={"X-Orbis-Otp": "withdrawal"})
+    await otp.check(user.id, "withdrawal", code)
+
+
 @router.post("/payments/withdraw", status_code=201)
 async def withdraw(body: Withdrawal, user: AuthUser = Depends(current_user)):
     s = get_settings()
@@ -240,6 +270,7 @@ async def withdraw(body: Withdrawal, user: AuthUser = Depends(current_user)):
             "Make one deposit from this M-Pesa number first. That confirms it is yours."
             if m["kind"] == "mpesa" else "This method is still being verified. It usually takes a working day."))
 
+    await _confirm_withdrawal(user, body.otp_code)
     kes = kes_down(amount, s.usd_kes_rate) if m["kind"] == "mpesa" else None
     ref = reference("WD")
 
