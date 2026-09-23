@@ -101,4 +101,15 @@ async def diagnose(err: Exception) -> str:
         ):
             if needle in m:
                 return "error: " + why
-        return f"error: {type(e).__name__}"
+        return f"error: {type(e).__name__}: {_scrub(str(e))}"
+
+
+def _scrub(msg: str) -> str:
+    """The driver's own words, with anything that locates or unlocks the database removed."""
+    import re
+    msg = re.sub(r"postgres(ql)?://\S+", "<url>", msg)
+    msg = re.sub(r'"[^"]*"', '"<host>"', msg)                      # quoted hosts and addresses
+    msg = re.sub(r"\d{1,3}(\.\d{1,3}){3}", "<ip>", msg)
+    msg = re.sub(r"[0-9a-f:]{6,}:[0-9a-f:]+", "<ip>", msg)       # IPv6
+    msg = re.sub(r"[\w.-]+\.(supabase\.(co|com)|amazonaws\.com)", "<host>", msg)
+    return " ".join(msg.split())[:240]
