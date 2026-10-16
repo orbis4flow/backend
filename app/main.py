@@ -113,5 +113,6 @@ async def health():
             security = "run sql/005_preferences_security.sql"
     return {"ok": database == "ok", "database": database, "trading": trading, "notifications_usdt_referrals": extras,
             "preferences_security": security,
-            "payhero": s.payhero_ready, "paystack": s.paystack_ready,
+            "mpesa_provider": "kora" if s.mpesa_uses_kora else "payhero",
+            "kora": s.kora_ready, "payhero": s.payhero_ready, "paystack": s.paystack_ready,
             "email": s.email_ready, "sms": s.sms_ready, "news": bool(s.finnhub_api_key)}

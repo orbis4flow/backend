@@ -20,7 +20,10 @@ services:
       # the UI's address: links in emails, referral links, returns from Paystack, CORS
       - key: FRONTEND_URL
         sync: false
-      # PayHero → API Keys, and the payment channel id
+      # Kora → Settings → API Configuration: the secret key (M-Pesa deposits)
+      - key: KORA_SECRET_KEY
+        sync: false
+      # PayHero → API Keys, and the payment channel id (only if MPESA_PROVIDER=payhero)
       - key: PAYHERO_API_USERNAME
         sync: false
       - key: PAYHERO_API_PASSWORD

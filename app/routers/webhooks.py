@@ -1,6 +1,8 @@
 """Provider callbacks. Each one is stored as received, then settled only after
 the provider confirms it on its own API (see services/settle.py).
 
+  Kora:     POST <this API>/webhooks/kora
+            (sent automatically with every charge as its notification_url)
   PayHero:  POST <this API>/webhooks/payhero?token={PAYHERO_CALLBACK_TOKEN}
             (sent automatically with every STK push)
   Paystack: POST <this API>/webhooks/paystack
@@ -15,7 +17,7 @@ from psycopg.types.json import Jsonb
 
 from .. import db
 from ..config import get_settings
-from ..services import paystack, settle
+from ..services import kora, paystack, settle
 from ..services.payhero import parse_callback
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
@@ -31,6 +33,30 @@ async def _record(provider: str, reference: str | None, payload: dict) -> int:
 async def _done(event_id: int, error: str | None = None) -> None:
     await db.run("update app.webhook_events set processed = %s, error = %s where id = %s",
                  (error is None, error, event_id))
+
+
+@router.post("/kora")
+async def kora_callback(request: Request):
+    try:
+        payload = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="bad payload")
+    if not isinstance(payload, dict) or not kora.signature_ok(payload, request.headers.get("x-korapay-signature")):
+        raise HTTPException(status_code=401, detail="bad signature")
+    data = payload.get("data") or {}
+    event = await _record("kora", data.get("reference"), payload)
+
+    tx = await settle.by_reference(data.get("reference") or "")
+    if not tx or tx["provider"] != "kora":
+        await _done(event, "unknown reference")
+        return {"ok": True}
+    try:
+        state = await settle.kora_check(tx)              # re-read from Kora, not from the webhook body
+        await _done(event, None if state in ("completed", "failed") else f"left {state}: Kora has not confirmed yet")
+    except Exception as e:
+        log.exception("kora webhook %s", data.get("reference"))
+        await _done(event, str(e)[:300])
+    return {"ok": True}
 
 
 @router.post("/payhero")

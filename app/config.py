@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     card_fee_pct: float = 1.5                     # kept from card deposits, as the UI shows
     demo_balance_usd: float = 10000.0
 
+    # ---------------------------------------------------------- M-Pesa ---
+    mpesa_provider: str = "kora"                  # who sends M-Pesa STK pushes: "kora" or "payhero"
+
+    # ------------------------------------------------------------ kora ---
+    kora_base_url: str = "https://api.korapay.com/merchant/api/v1"
+    kora_secret_key: str = ""                     # sk_test_… or sk_live_…
+
     # --------------------------------------------------------- payhero ---
     payhero_base_url: str = "https://backend.payhero.co.ke/api/v2"
     payhero_api_username: str = ""
@@ -83,6 +90,18 @@ class Settings(BaseSettings):
     @property
     def is_dev(self) -> bool:
         return self.env.lower() in ("dev", "development", "local")
+
+    @property
+    def kora_ready(self) -> bool:
+        return bool(self.kora_secret_key)
+
+    @property
+    def mpesa_uses_kora(self) -> bool:
+        return self.mpesa_provider.strip().lower() != "payhero"
+
+    @property
+    def mpesa_ready(self) -> bool:
+        return self.kora_ready if self.mpesa_uses_kora else self.payhero_ready
 
     @property
     def payhero_ready(self) -> bool:

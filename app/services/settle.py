@@ -2,20 +2,52 @@
 
 Used by both the webhooks and the status poll, so a payment settles the same
 way whichever arrives first. Nothing here trusts a callback's word for it:
-PayHero outcomes are re-read from /transaction-status and Paystack outcomes
-from /transaction/verify before any balance changes.
+Kora outcomes are re-read from /charges/{reference}, PayHero outcomes from
+/transaction-status and Paystack outcomes from /transaction/verify before any balance changes.
 """
 import logging
 from decimal import Decimal
 
 from .. import db
-from . import ledger, payhero, paystack
+from . import kora, ledger, payhero, paystack
 
 log = logging.getLogger("orbisflow.settle")
 
 
 async def by_reference(reference: str) -> dict | None:
     return await db.one("select * from app.transactions where reference = %s", (reference,))
+
+
+# --------------------------------------------------------------------- kora --
+async def kora_check(tx: dict) -> str:
+    """Ask Kora what happened to tx and settle it. Returns the new state
+    ('completed', 'failed', or the unchanged one when Kora cannot say yet)."""
+    if tx["type"] != "deposit":
+        return tx["status"]      # withdrawals are paid by hand, never through Kora
+    try:
+        data = await kora.status(tx["reference"])
+    except kora.KoraError as e:
+        log.warning("kora status failed for %s: %s", tx["reference"], e)
+        return tx["status"]
+
+    verdict = kora.status_says(data)
+    if verdict == "success":
+        paid = data.get("amount_paid") or data.get("amount")
+        if str(data.get("currency") or "KES").upper() != "KES" or (
+                paid is not None and tx["local_amount"] is not None and Decimal(str(paid)) < tx["local_amount"]):
+            await ledger.fail_deposit(tx["reference"], f"Paid {data.get('currency')} {paid}, expected KSh {tx['local_amount']}")
+            log.error("kora mismatch on %s: %s", tx["reference"], data)
+            return "failed"
+        done = await ledger.complete_deposit(tx["reference"], receipt=data.get("payment_reference") or None,
+                                             provider_ref=data.get("transaction_reference") or tx["provider_ref"])
+        if done:
+            await ledger.verify_method(done["payment_method_id"])
+        return "completed"
+    if verdict == "failed":
+        await ledger.fail_deposit(tx["reference"], data.get("message") or data.get("narration")
+                                  or "M-Pesa payment was not completed")
+        return "failed"
+    return tx["status"]
 
 
 # ------------------------------------------------------------------ payhero --

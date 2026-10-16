@@ -1,6 +1,6 @@
 # orbisflow API
 
-FastAPI service behind the orbisflow UI. It handles sign-up and sign-in (through Supabase Auth), profiles, payment methods, referral links, M-Pesa deposits (PayHero), card deposits (Paystack), and manual withdrawals. Data lives in Supabase Postgres.
+FastAPI service behind the orbisflow UI. It handles sign-up and sign-in (through Supabase Auth), profiles, payment methods, referral links, M-Pesa deposits (Kora by default, PayHero as an alternative), card deposits (Paystack), and manual withdrawals. Data lives in Supabase Postgres.
 
 This folder is its own repository. The UI repository ignores it (`.gitignore`, `.vercelignore`).
 
@@ -35,7 +35,8 @@ Dashboard → Authentication:
 |---|---|
 | `DATABASE_URL` | Supabase → **Connect → Session pooler**, with your database password. Not the direct `db.mbazpiignlrayzbwbxth.supabase.co` string: that host is IPv6 only and Render cannot reach it. |
 | `FRONTEND_URL` | The UI's address, e.g. `https://orbisflow.com` |
-| `PAYHERO_API_USERNAME`, `PAYHERO_API_PASSWORD` | PayHero → API Keys |
+| `KORA_SECRET_KEY` | Kora → Settings → API Configuration (`sk_test_…` or `sk_live_…`) |
+| `PAYHERO_API_USERNAME`, `PAYHERO_API_PASSWORD` | PayHero → API Keys (only with `MPESA_PROVIDER=payhero`) |
 | `PAYHERO_CHANNEL_ID` | PayHero → Payment Channels: the till or paybill that receives payments |
 | `PAYSTACK_SECRET_KEY` | Paystack → Settings → API Keys & Webhooks (`sk_test_…` or `sk_live_…`) |
 
@@ -56,11 +57,18 @@ Everything else has a default in `app/config.py`. Add a variable in Render only 
 | `MIN_DEPOSIT_USD` / `MAX_DEPOSIT_USD` | `2` / `10000` |
 | `MIN_WITHDRAW_USD` / `WITHDRAW_FEE_USD` | `5` / `1` |
 | `CARD_FEE_PCT` | `1.5` |
+| `MPESA_PROVIDER` | `kora`. Set to `payhero` to send M-Pesa STK pushes through PayHero instead |
 | `PAYSTACK_CURRENCY` | `KES` (the currency your Paystack account settles in) |
 | `CORS_ORIGINS` | none. `FRONTEND_URL` is always allowed; add others (a `www.` address, a Vercel preview) comma separated |
 | `SUPABASE_JWT_SECRET` | none. Only for projects still on the legacy JWT secret |
 
-## 4 · PayHero (M-Pesa deposits)
+## 4 · Kora (M-Pesa deposits, the default)
+
+Kora sends the STK push for M-Pesa deposits. Only the **secret key** is needed, and run `sql/006_kora.sql` once. Nothing to set for webhooks: every charge carries `https://<your-service>.onrender.com/webhooks/kora` as its notification URL.
+
+Kora signs its webhooks, and the API still re-reads the charge from Kora's `/charges/{reference}` before crediting.
+
+### PayHero (alternative, `MPESA_PROVIDER=payhero`)
 
 PayHero is used for deposits only: an STK push to the user's phone. Nothing to set for callbacks: every push carries its own callback URL with the secret token.
 
@@ -182,7 +190,7 @@ All JSON. Signed-in routes take `Authorization: Bearer <access_token>`. Errors a
 | GET | `/sessions` | signed-in devices |
 | DELETE | `/sessions/{id}` | sign one device out |
 | POST | `/sessions/revoke-others` | sign every other device out |
-| POST | `/webhooks/payhero`, `/webhooks/paystack` | provider callbacks |
+| POST | `/webhooks/kora`, `/webhooks/payhero`, `/webhooks/paystack` | provider callbacks |
 | GET | `/health` | database and provider readiness |
 
 `/docs` (the interactive API explorer) is on only when `ENV=development`.
@@ -198,7 +206,7 @@ uvicorn app.main:app --reload
 python -m pip install pytest && python -m pytest -q    # offline tests, no keys needed
 ```
 
-To receive PayHero callbacks on your machine, expose port 8000 with a tunnel (e.g. `cloudflared tunnel --url http://localhost:8000`) and set `PUBLIC_API_URL` in `.env` to the tunnel address.
+To receive Kora or PayHero callbacks on your machine, expose port 8000 with a tunnel (e.g. `cloudflared tunnel --url http://localhost:8000`) and set `PUBLIC_API_URL` in `.env` to the tunnel address.
 
 ## Trading
 

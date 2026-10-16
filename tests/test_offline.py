@@ -14,7 +14,7 @@ from app import util
 from app.config import get_settings
 from app.main import app
 from app.routers import auth as auth_router
-from app.services import payhero, paystack, profiles
+from app.services import kora, payhero, paystack, profiles
 
 client = TestClient(app)          # not used as a context manager, so no database pool opens
 
@@ -52,6 +52,28 @@ def test_codes_avoid_lookalikes():
 def test_tron_address():
     assert util.TRON_ADDRESS.fullmatch("TXqLJrvZc9ouyVPai66WR55dvDVetR83BH")
     assert not util.TRON_ADDRESS.fullmatch("0xabc")
+
+
+# --------------------------------------------------------------------- kora --
+def test_mpesa_defaults_to_kora():
+    from app.config import Settings
+    assert Settings(_env_file=None).mpesa_uses_kora
+    assert not Settings(_env_file=None, mpesa_provider="payhero").mpesa_uses_kora
+
+
+def test_kora_status_words():
+    assert kora.status_says({"status": "success"}) == "success"
+    assert kora.status_says({"status": "failed"}) == "failed"
+    assert kora.status_says({"status": "processing"}) == "pending"
+
+
+def test_kora_signature(monkeypatch):
+    monkeypatch.setattr(get_settings(), "kora_secret_key", "sk_test_x")
+    data = {"reference": "DP-1", "currency": "KES", "amount": 259, "status": "success"}
+    sig = hmac.new(b"sk_test_x", json.dumps(data, separators=(",", ":")).encode(), hashlib.sha256).hexdigest()
+    assert kora.signature_ok({"event": "charge.success", "data": data}, sig)
+    assert not kora.signature_ok({"event": "charge.success", "data": data}, "0" * 64)
+    assert client.post("/webhooks/kora", json={"data": data}, headers={"x-korapay-signature": "bad"}).status_code == 401
 
 
 # ------------------------------------------------------------------ payhero --

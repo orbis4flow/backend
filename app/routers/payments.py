@@ -1,4 +1,4 @@
-"""Deposits (M-Pesa via PayHero, cards via Paystack), withdrawals, and history.
+"""Deposits (M-Pesa via Kora, or PayHero when MPESA_PROVIDER=payhero; cards via Paystack), withdrawals, and history.
 
 Withdrawals are manual: the balance is taken when the user asks, the request
 waits in review, and a person pays it and marks it done (or rejects it and
@@ -20,7 +20,7 @@ from ..config import get_settings
 from ..security import AuthUser, current_user
 from psycopg.errors import UniqueViolation
 
-from ..services import ledger, limits, notify, otp, payhero, paystack, profiles, settle, tron
+from ..services import kora, ledger, limits, notify, otp, payhero, paystack, profiles, settle, tron
 from ..util import kenyan_msisdn, kes_down, kes_up, mask_phone, reference, show_date, usd
 from .payment_methods import upsert_mpesa
 
@@ -108,7 +108,7 @@ async def rates():
 @router.post("/payments/deposit/mpesa", status_code=201)
 async def deposit_mpesa(body: MpesaDeposit, user: AuthUser = Depends(current_user)):
     s = get_settings()
-    if not s.payhero_ready:
+    if not s.mpesa_ready:
         raise HTTPException(status_code=503, detail="M-Pesa deposits are not switched on yet.")
     p = await profiles.for_user(user)
     amount = _deposit_amount(body.amount_usd)
@@ -129,24 +129,31 @@ async def deposit_mpesa(body: MpesaDeposit, user: AuthUser = Depends(current_use
     method = await upsert_mpesa(user.id, msisdn, p["full_name"])
     kes = kes_up(amount, s.usd_kes_rate)
     ref = reference("DP")
+    provider = "kora" if s.mpesa_uses_kora else "payhero"
     async with db.tx() as conn:
         tx = await _insert(conn, user_id=user.id, account_id=await profiles.real_account_id(user.id, conn),
-                           payment_method_id=method["id"], type="deposit", method="mpesa", provider="payhero",
+                           payment_method_id=method["id"], type="deposit", method="mpesa", provider=provider,
                            amount_usd=amount, fee_usd=Decimal("0"), net_usd=amount, local_amount=kes,
                            local_currency="KES", fx_rate=Decimal(str(s.usd_kes_rate)), reference=ref,
                            destination=mask_phone(msisdn), meta=Jsonb({}))
 
     try:
-        res = await payhero.stk_push(amount_kes=kes, msisdn=msisdn, reference=ref,
-                                     customer_name=p["full_name"] or p["email"])
-    except payhero.PayHeroError as e:
+        if provider == "kora":
+            res = await kora.stk_push(amount_kes=kes, msisdn=msisdn, reference=ref,
+                                      customer_name=p["full_name"] or p["email"], email=p["email"])
+            pref = res.get("transaction_reference") or ref
+        else:
+            res = await payhero.stk_push(amount_kes=kes, msisdn=msisdn, reference=ref,
+                                         customer_name=p["full_name"] or p["email"])
+            pref = res.get("reference") or res.get("CheckoutRequestID")
+    except (kora.KoraError, payhero.PayHeroError) as e:
         await ledger.fail_deposit(ref, str(e))
         raise HTTPException(status_code=502, detail=f"The M-Pesa prompt could not be sent: {e}")
 
     tx = await db.one(
         """update app.transactions set status = 'processing', provider_ref = %s, meta = meta || %s
             where reference = %s and status = 'pending' returning *""",
-        (res.get("reference") or res.get("CheckoutRequestID"), Jsonb({"stk": res}), ref)) or tx
+        (pref, Jsonb({"stk": res}), ref)) or tx
     return public(tx)
 
 
@@ -307,7 +314,9 @@ async def payment(ref: str, user: AuthUser = Depends(current_user)):
         raise HTTPException(status_code=404, detail="That payment was not found.")
     age = (datetime.now(timezone.utc) - tx["created_at"]).total_seconds()
     if tx["status"] in ("pending", "processing") and (age > 8 or tx["provider"] == "tron"):
-        if tx["provider"] == "payhero":
+        if tx["provider"] == "kora":
+            await settle.kora_check(tx)
+        elif tx["provider"] == "payhero":
             await settle.payhero_check(tx)
         elif tx["provider"] == "paystack":
             await settle.paystack_check(tx)
