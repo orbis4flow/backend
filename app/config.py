@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     demo_balance_usd: float = 10000.0
 
     # ---------------------------------------------------------- M-Pesa ---
-    mpesa_provider: str = "kora"                  # who sends M-Pesa STK pushes: "kora" or "payhero"
+    mpesa_provider: str = "kora"                  # "kora": Kora push → Kora checkout → PayHero; "payhero": PayHero only
 
     # ------------------------------------------------------------ kora ---
     kora_base_url: str = "https://api.korapay.com/merchant/api/v1"
@@ -105,7 +105,7 @@ class Settings(BaseSettings):
 
     @property
     def mpesa_ready(self) -> bool:
-        return self.kora_ready if self.mpesa_uses_kora else self.payhero_ready
+        return (self.mpesa_uses_kora and self.kora_ready) or self.payhero_ready
 
     @property
     def payhero_ready(self) -> bool:

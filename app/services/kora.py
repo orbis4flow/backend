@@ -1,4 +1,9 @@
-"""Kora (Korapay): M-Pesa deposits by STK push, the default M-Pesa provider.
+"""Kora (Korapay): M-Pesa deposits, the default M-Pesa provider.
+
+First an STK push straight to the phone (/charges/mobile-money). If Kora
+refuses it, Kora's hosted checkout (/charges/initialize), limited to mobile
+money, where the user pays on Kora's page and comes back to the cashier.
+Both need only the secret key.
 
 API reference: https://developers.korapay.com
 Authentication is a Bearer token: the secret key from the Kora dashboard
@@ -57,6 +62,29 @@ async def stk_push(*, amount_kes: int, msisdn: str, reference: str, customer_nam
         "customer": {"name": customer_name or "orbisflow client", "email": email},
         "mobile_money": {"number": msisdn},
     })
+
+
+CHECKOUT_SUFFIX = "-KC"    # a checkout after a refused push gets its own reference at Kora
+
+
+async def checkout(*, amount_kes: int, reference: str, customer_name: str, email: str, redirect_url: str) -> dict:
+    """Kora's hosted payment page, mobile money only. Returns checkout_url."""
+    return await _call("POST", "/charges/initialize", json={
+        "amount": amount_kes,
+        "currency": "KES",
+        "reference": reference,
+        "redirect_url": redirect_url,
+        "notification_url": notification_url(),
+        "narration": "orbisflow deposit",
+        "channels": ["mobile_money"],
+        "default_channel": "mobile_money",
+        "customer": {"name": customer_name or "orbisflow client", "email": email},
+    })
+
+
+def our_reference(kora_reference: str) -> str:
+    """The transaction's own reference, from the one Kora knows it by."""
+    return kora_reference.removesuffix(CHECKOUT_SUFFIX)
 
 
 async def status(reference: str) -> dict:

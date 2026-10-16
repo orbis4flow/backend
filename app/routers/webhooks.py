@@ -46,7 +46,7 @@ async def kora_callback(request: Request):
     data = payload.get("data") or {}
     event = await _record("kora", data.get("reference"), payload)
 
-    tx = await settle.by_reference(data.get("reference") or "")
+    tx = await settle.by_reference(kora.our_reference(data.get("reference") or ""))
     if not tx or tx["provider"] != "kora":
         await _done(event, "unknown reference")
         return {"ok": True}

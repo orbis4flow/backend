@@ -300,3 +300,15 @@ def test_support_rate_limit():
     for _ in range(support.PER_WINDOW):
         assert support._allow("u-test")
     assert not support._allow("u-test")
+
+
+def test_kora_checkout_reference_maps_back():
+    assert kora.our_reference("DP-ABC123" + kora.CHECKOUT_SUFFIX) == "DP-ABC123"
+    assert kora.our_reference("DP-ABC123") == "DP-ABC123"
+
+
+def test_mpesa_ready_falls_back_to_payhero():
+    from app.config import Settings
+    assert not Settings(_env_file=None).mpesa_ready
+    assert Settings(_env_file=None, kora_secret_key="sk").mpesa_ready
+    assert Settings(_env_file=None, payhero_api_username="u", payhero_api_password="p", payhero_channel_id=1).mpesa_ready

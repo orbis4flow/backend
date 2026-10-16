@@ -25,7 +25,7 @@ async def kora_check(tx: dict) -> str:
     if tx["type"] != "deposit":
         return tx["status"]      # withdrawals are paid by hand, never through Kora
     try:
-        data = await kora.status(tx["reference"])
+        data = await kora.status((tx["meta"] or {}).get("kora_ref") or tx["reference"])
     except kora.KoraError as e:
         log.warning("kora status failed for %s: %s", tx["reference"], e)
         return tx["status"]

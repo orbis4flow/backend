@@ -69,6 +69,14 @@ Kora sends the STK push for M-Pesa deposits. Only the **secret key** is needed, 
 
 Kora signs its webhooks, and the API still re-reads the charge from Kora's `/charges/{reference}` before crediting.
 
+Each M-Pesa deposit tries, in order, until one is accepted:
+
+1. **Kora push**: an STK prompt straight to the phone (`/charges/mobile-money`).
+2. **Kora checkout**: if Kora refuses the push, Kora's hosted page limited to mobile money (`/charges/initialize`, reference `DP-…-KC`). The user pays there and returns to `/cashier?deposit=DP-…`, which confirms it.
+3. **PayHero push**: if Kora refuses both, and the PayHero keys are set.
+
+What each step answered is kept in the transaction's `failure_reason` when all three fail, and in the logs.
+
 ### PayHero (alternative, `MPESA_PROVIDER=payhero`)
 
 PayHero is used for deposits only: an STK push to the user's phone. Nothing to set for callbacks: every push carries its own callback URL with the secret token.

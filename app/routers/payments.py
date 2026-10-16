@@ -1,4 +1,6 @@
-"""Deposits (M-Pesa via Kora, or PayHero when MPESA_PROVIDER=payhero; cards via Paystack), withdrawals, and history.
+"""Deposits (M-Pesa: Kora's push, then Kora's checkout, then PayHero, each
+tried when the one before is refused; MPESA_PROVIDER=payhero uses PayHero only.
+Cards via Paystack), withdrawals, and history.
 
 Withdrawals are manual: the balance is taken when the user asks, the request
 waits in review, and a person pays it and marks it done (or rejects it and
@@ -25,6 +27,7 @@ from ..util import kenyan_msisdn, kes_down, kes_up, mask_phone, reference, show_
 from .payment_methods import upsert_mpesa
 
 router = APIRouter(tags=["payments"])
+log = logging.getLogger("orbisflow.payments")
 
 METHOD_LABEL = {"mpesa": "M-Pesa", "card": "Card", "bank": "Bank transfer", "usdt": "USDT (TRC-20)",
                 "referral": "Referral earnings"}
@@ -129,7 +132,7 @@ async def deposit_mpesa(body: MpesaDeposit, user: AuthUser = Depends(current_use
     method = await upsert_mpesa(user.id, msisdn, p["full_name"])
     kes = kes_up(amount, s.usd_kes_rate)
     ref = reference("DP")
-    provider = "kora" if s.mpesa_uses_kora else "payhero"
+    provider = "kora" if s.mpesa_uses_kora and s.kora_ready else "payhero"
     async with db.tx() as conn:
         tx = await _insert(conn, user_id=user.id, account_id=await profiles.real_account_id(user.id, conn),
                            payment_method_id=method["id"], type="deposit", method="mpesa", provider=provider,
@@ -137,24 +140,47 @@ async def deposit_mpesa(body: MpesaDeposit, user: AuthUser = Depends(current_use
                            local_currency="KES", fx_rate=Decimal(str(s.usd_kes_rate)), reference=ref,
                            destination=mask_phone(msisdn), meta=Jsonb({}))
 
-    try:
-        if provider == "kora":
-            res = await kora.stk_push(amount_kes=kes, msisdn=msisdn, reference=ref,
-                                      customer_name=p["full_name"] or p["email"], email=p["email"])
-            pref = res.get("transaction_reference") or ref
-        else:
-            res = await payhero.stk_push(amount_kes=kes, msisdn=msisdn, reference=ref,
-                                         customer_name=p["full_name"] or p["email"])
-            pref = res.get("reference") or res.get("CheckoutRequestID")
-    except (kora.KoraError, payhero.PayHeroError) as e:
-        await ledger.fail_deposit(ref, str(e))
-        raise HTTPException(status_code=502, detail=f"The M-Pesa prompt could not be sent: {e}")
+    name = p["full_name"] or p["email"]
+    tried: list[str] = []
 
-    tx = await db.one(
-        """update app.transactions set status = 'processing', provider_ref = %s, meta = meta || %s
-            where reference = %s and status = 'pending' returning *""",
-        (pref, Jsonb({"stk": res}), ref)) or tx
-    return public(tx)
+    async def processing(provider: str, pref: str | None, meta: dict) -> dict:
+        return await db.one(
+            """update app.transactions set status = 'processing', provider = %s, provider_ref = %s, meta = meta || %s
+                where reference = %s and status = 'pending' returning *""",
+            (provider, pref, Jsonb(meta), ref)) or tx
+
+    if provider == "kora":
+        # 1 · Kora's push, straight to the phone
+        try:
+            res = await kora.stk_push(amount_kes=kes, msisdn=msisdn, reference=ref, customer_name=name, email=p["email"])
+            return public(await processing("kora", res.get("transaction_reference") or ref, {"stk": res, "kora_ref": ref}))
+        except kora.KoraError as e:
+            log.warning("kora push refused for %s: %s", ref, e)
+            tried.append(f"Kora push: {e}")
+
+        # 2 · Kora's hosted checkout; the user pays on Kora's page and comes back
+        kref = ref + kora.CHECKOUT_SUFFIX
+        try:
+            res = await kora.checkout(amount_kes=kes, reference=kref, customer_name=name, email=p["email"],
+                                      redirect_url=f"{s.frontend_url}/cashier?deposit={ref}")
+            out = public(await processing("kora", kref, {"checkout": res, "kora_ref": kref}))
+            out["checkoutUrl"] = res["checkout_url"]
+            return out
+        except (kora.KoraError, KeyError) as e:
+            log.warning("kora checkout refused for %s: %s", ref, e)
+            tried.append(f"Kora checkout: {e}")
+
+    # 3 · PayHero's push
+    if s.payhero_ready:
+        try:
+            res = await payhero.stk_push(amount_kes=kes, msisdn=msisdn, reference=ref, customer_name=name)
+            return public(await processing("payhero", res.get("reference") or res.get("CheckoutRequestID"), {"stk": res}))
+        except payhero.PayHeroError as e:
+            log.warning("payhero push refused for %s: %s", ref, e)
+            tried.append(f"PayHero: {e}")
+
+    await ledger.fail_deposit(ref, "; ".join(tried) or "No M-Pesa provider is available")
+    raise HTTPException(status_code=502, detail="The M-Pesa payment could not be started. Try again in a few minutes.")
 
 
 # -------------------------------------------------------------------- card --
