@@ -201,6 +201,7 @@ All JSON. Signed-in routes take `Authorization: Bearer <access_token>`. Errors a
 | POST | `/sessions/revoke-others` | sign every other device out |
 | POST | `/webhooks/kora`, `/webhooks/payhero`, `/webhooks/paystack` | provider callbacks |
 | GET | `/health` | database and provider readiness |
+| GET | `/status` | daily uptime per service for the status page (checked every five minutes; needs `sql/007_status.sql`) |
 
 `/docs` (the interactive API explorer) is on only when `ENV=development`.
 

@@ -312,3 +312,22 @@ def test_mpesa_ready_falls_back_to_payhero():
     assert not Settings(_env_file=None).mpesa_ready
     assert Settings(_env_file=None, kora_secret_key="sk").mpesa_ready
     assert Settings(_env_file=None, payhero_api_username="u", payhero_api_password="p", payhero_channel_id=1).mpesa_ready
+
+
+# ------------------------------------------------------------------- status --
+def test_status_severity():
+    from app.services import monitor
+    assert monitor.severity(100) == 0
+    assert monitor.severity(98) == 1
+    assert monitor.severity(92) == 2
+    assert monitor.severity(50) == 3
+
+
+def test_status_only_checks_what_is_switched_on(monkeypatch):
+    from app.services import monitor
+    s = get_settings()
+    monkeypatch.setattr(s, "groq_api_key", "")
+    monkeypatch.setattr(s, "paystack_secret_key", "")
+    keys = monitor._checks().keys()
+    assert {"api", "trading", "withdraw", "usdt"} <= set(keys)
+    assert "chat" not in keys and "card" not in keys

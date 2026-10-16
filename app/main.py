@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import db, supabase_auth
-from .services import referrals as referral_jobs, tron
+from .services import monitor, referrals as referral_jobs, tron
 from .config import get_settings
 from .routers import account, auth, market, me, payment_methods, payments, referrals, support, trades, webhooks
 
@@ -30,8 +30,9 @@ log = logging.getLogger("orbisflow")
 async def lifespan(_: FastAPI):
     await db.open_pool()
     stop = asyncio.Event()
-    # background jobs: USDT deposits to match, referral earnings to count and pay
-    jobs = [asyncio.create_task(tron.watch(stop)), asyncio.create_task(referral_jobs.work(stop))]
+    # background jobs: USDT deposits to match, referral earnings to count and pay, uptime checks
+    jobs = [asyncio.create_task(tron.watch(stop)), asyncio.create_task(referral_jobs.work(stop)),
+            asyncio.create_task(monitor.watch(stop))]
     yield
     stop.set()
     for j in jobs:
@@ -80,6 +81,17 @@ async def unexpected(_: Request, exc: Exception):
 for r in (auth.router, me.router, payment_methods.router, referrals.router, payments.router, trades.router,
           market.router, account.router, support.router, webhooks.router):
     app.include_router(r)
+
+
+@app.get("/status", tags=["health"])
+async def status():
+    """Daily uptime per service for the public status page (services/monitor.py)."""
+    try:
+        services = await monitor.days()
+    except Exception as e:
+        return JSONResponse(status_code=503, content={"detail": "Status history is not available.",
+                                                      "database": await db.diagnose(e)})
+    return {"since": min((d["date"] for s in services for d in s["days"]), default=None), "services": services}
 
 
 @app.get("/health", tags=["health"])
