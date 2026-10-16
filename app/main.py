@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from . import db, supabase_auth
 from .services import referrals as referral_jobs, tron
 from .config import get_settings
-from .routers import account, auth, market, me, payment_methods, payments, referrals, trades, webhooks
+from .routers import account, auth, market, me, payment_methods, payments, referrals, support, trades, webhooks
 
 # psycopg's async driver needs the selector loop on Windows (local dev only)
 if sys.platform == "win32":
@@ -78,7 +78,7 @@ async def unexpected(_: Request, exc: Exception):
 
 
 for r in (auth.router, me.router, payment_methods.router, referrals.router, payments.router, trades.router,
-          market.router, account.router, webhooks.router):
+          market.router, account.router, support.router, webhooks.router):
     app.include_router(r)
 
 
@@ -115,4 +115,4 @@ async def health():
             "preferences_security": security,
             "mpesa_provider": "kora" if s.mpesa_uses_kora else "payhero",
             "kora": s.kora_ready, "payhero": s.payhero_ready, "paystack": s.paystack_ready,
-            "email": s.email_ready, "sms": s.sms_ready, "news": bool(s.finnhub_api_key)}
+            "assistant": bool(s.groq_api_key), "email": s.email_ready, "sms": s.sms_ready, "news": bool(s.finnhub_api_key)}

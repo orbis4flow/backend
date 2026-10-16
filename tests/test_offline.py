@@ -288,3 +288,15 @@ def test_pause_rules(monkeypatch):
     assert r.status_code == 400 and "42 days" in r.json()["detail"]
     r = client.post("/preferences/pause", json={"kind": "self_exclusion", "days": 30}, headers=h)
     assert r.status_code == 400 and "six months" in r.json()["detail"]
+
+
+# ------------------------------------------------------------------ support --
+def test_support_chat_needs_sign_in():
+    assert client.post("/support/chat", json={"messages": [{"role": "user", "content": "hi"}]}).status_code == 401
+
+
+def test_support_rate_limit():
+    from app.routers import support
+    for _ in range(support.PER_WINDOW):
+        assert support._allow("u-test")
+    assert not support._allow("u-test")

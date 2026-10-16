@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     paystack_secret_key: str = ""
     paystack_currency: str = "KES"                # the currency the Paystack account settles in
 
+    # ------------------------------------------- live chat assistant (Groq) ---
+    groq_api_key: str = ""                         # free key from console.groq.com
+    groq_model: str = "llama-3.3-70b-versatile"
+
     # ----------------------------------------------------- email (Resend) ---
     resend_api_key: str = ""
     email_from: str = "orbisflow <no-reply@orbisflow.com>"   # a sender on a domain verified in Resend
