@@ -1,5 +1,5 @@
 -- =============================================================================
--- orbisflow · 005 · preferences, two-factor codes, sessions
+-- obisflow · 005 · preferences, two-factor codes, sessions
 -- Run after 004, in the Supabase SQL editor. Safe to re-run.
 -- =============================================================================
 

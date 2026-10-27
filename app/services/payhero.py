@@ -63,7 +63,7 @@ async def stk_push(*, amount_kes: int, msisdn: str, reference: str, customer_nam
         "channel_id": s.payhero_channel_id,
         "provider": "m-pesa",
         "external_reference": reference,
-        "customer_name": customer_name or "orbisflow client",
+        "customer_name": customer_name or "obisflow client",
         "callback_url": callback_url(),
     })
 

@@ -1,6 +1,6 @@
-# orbisflow API
+# obisflow API
 
-FastAPI service behind the orbisflow UI. It handles sign-up and sign-in (through Supabase Auth), profiles, payment methods, referral links, M-Pesa deposits (Kora by default, PayHero as an alternative), card deposits (Paystack), and manual withdrawals. Data lives in Supabase Postgres.
+FastAPI service behind the obisflow UI. It handles sign-up and sign-in (through Supabase Auth), profiles, payment methods, referral links, M-Pesa deposits (Kora by default, PayHero as an alternative), card deposits (Paystack), and manual withdrawals. Data lives in Supabase Postgres.
 
 This folder is its own repository. The UI repository ignores it (`.gitignore`, `.vercelignore`).
 
@@ -21,7 +21,7 @@ See `sql/README.md` for the admin queries (withdrawal review, lookups, verifying
 
 Dashboard → Authentication:
 
-- **URL Configuration** → Site URL: your UI address, e.g. `https://orbisflow.com`. Add to Redirect URLs: `https://orbisflow.com/login` (and `http://localhost:5500/login` for local work).
+- **URL Configuration** → Site URL: your UI address, e.g. `https://obisflow.com`. Add to Redirect URLs: `https://obisflow.com/login` (and `http://localhost:5500/login` for local work).
 - **Sign In / Providers → Email**: choose whether new accounts must confirm their email. Both work: with confirmation on, sign-up answers `confirm_email: true` and the UI asks the user to check their inbox.
 - **Sign In / Providers → Google** (for "Continue with Google"): turn it on and paste the Google OAuth client id and secret.
 - **JWT Keys**: if the project still uses the legacy JWT secret, copy it into `SUPABASE_JWT_SECRET`. On signing keys (the default for new projects) leave it empty; tokens are checked against the project's public keys.
@@ -34,7 +34,7 @@ Dashboard → Authentication:
 | Variable | Where it comes from |
 |---|---|
 | `DATABASE_URL` | Supabase → **Connect → Session pooler**, with your database password. Not the direct `db.mbazpiignlrayzbwbxth.supabase.co` string: that host is IPv6 only and Render cannot reach it. |
-| `FRONTEND_URL` | The UI's address, e.g. `https://orbisflow.com` |
+| `FRONTEND_URL` | The UI's address, e.g. `https://obisflow.com` |
 | `KORA_SECRET_KEY` | Kora → Settings → API Configuration (`sk_test_…` or `sk_live_…`) |
 | `PAYHERO_API_USERNAME`, `PAYHERO_API_PASSWORD` | PayHero → API Keys (only with `MPESA_PROVIDER=payhero`) |
 | `PAYHERO_CHANNEL_ID` | PayHero → Payment Channels: the till or paybill that receives payments |
@@ -55,7 +55,7 @@ Everything else has a default in `app/config.py`. Add a variable in Render only 
 | Variable | Default |
 |---|---|
 | `USD_KES_RATE` | `129.5` |
-| `MIN_DEPOSIT_USD` / `MAX_DEPOSIT_USD` | `2` / `10000` |
+| `MIN_DEPOSIT_USD` / `MAX_DEPOSIT_USD` | `5` / `10000` |
 | `MIN_WITHDRAW_USD` / `WITHDRAW_FEE_USD` | `5` / `1` |
 | `CARD_FEE_PCT` | `1.5` |
 | `MPESA_PROVIDER` | `kora`. Set to `payhero` to send M-Pesa STK pushes through PayHero instead |
@@ -89,7 +89,7 @@ Only the **secret key** is needed. Card payments open on Paystack's hosted check
 
 Set the webhook URL in Paystack → Settings → API Keys & Webhooks: `https://<your-service>.onrender.com/webhooks/paystack`.
 
-Dollar amounts are charged in `PAYSTACK_CURRENCY` (KES), converted at `USD_KES_RATE`. The card number never reaches orbisflow. A card that pays successfully is saved as a verified payment method.
+Dollar amounts are charged in `PAYSTACK_CURRENCY` (KES), converted at `USD_KES_RATE`. The card number never reaches obisflow. A card that pays successfully is saved as a verified payment method.
 
 ## 6 · Email (Resend) and SMS (Africa's Talking)
 
@@ -98,8 +98,8 @@ Optional: without keys the API still works and records each message as skipped i
 | Variable | |
 |---|---|
 | `RESEND_API_KEY` | resend.com → API Keys |
-| `EMAIL_FROM` | a sender on a domain you have verified in Resend (Domains → add, then the DNS records), e.g. `orbisflow <no-reply@orbisflow.com>`. Until a domain is verified Resend only delivers to your own address. |
-| `SUPPORT_EMAIL` | where replies go; default `support@orbisflow.com` |
+| `EMAIL_FROM` | a sender on a domain you have verified in Resend (Domains → add, then the DNS records), e.g. `obisflow <no-reply@obisflow.com>`. Until a domain is verified Resend only delivers to your own address. |
+| `SUPPORT_EMAIL` | where replies go; default `support@obisflow.com` |
 | `AT_USERNAME`, `AT_API_KEY` | africastalking.com → your app → Settings → API Key. Use `sandbox` as the username to test in their simulator. |
 | `AT_SENDER_ID` | an approved alphanumeric sender ID (optional; without one Safaricom shows a shared short code) |
 
@@ -118,7 +118,7 @@ Free, on TronGrid. A deposit request gets its own exact amount (50.37 USDT for a
 
 | Variable | |
 |---|---|
-| `USDT_DEPOSIT_ADDRESS` | **your** TRON wallet address. The default is the one that was in the UI; make sure it is a wallet orbisflow controls. |
+| `USDT_DEPOSIT_ADDRESS` | **your** TRON wallet address. The default is the one that was in the UI; make sure it is a wallet obisflow controls. |
 | `TRONGRID_API_KEY` | optional, free at trongrid.io; raises the rate limit |
 | `USDT_REQUEST_MINUTES` | how long a request stays open, default 120 |
 
@@ -143,7 +143,7 @@ A withdrawal takes the amount plus the fee from the balance at once and waits in
 
 | Rule | |
 |---|---|
-| Minimum deposit $2 | |
+| Minimum deposit $5 | |
 | Minimum withdrawal $5, with the $1 fee on top ($6 leaves the balance) | |
 | Card deposits keep 1.5% | |
 | M-Pesa amounts at KSh 129.5 to $1 | Deposits round the shillings up, withdrawals round them down |

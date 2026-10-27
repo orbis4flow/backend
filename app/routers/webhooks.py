@@ -21,7 +21,7 @@ from ..services import kora, paystack, settle
 from ..services.payhero import parse_callback
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
-log = logging.getLogger("orbisflow.webhooks")
+log = logging.getLogger("obisflow.webhooks")
 
 
 async def _record(provider: str, reference: str | None, payload: dict) -> int:

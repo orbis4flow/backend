@@ -2,7 +2,7 @@
 
 For each referrer and each week (Monday to Sunday, Nairobi time):
   volume   = real-money stakes their referrals placed that week
-  spread   = volume x REFERRAL_SPREAD_PCT (orbisflow's earnings on it)
+  spread   = volume x REFERRAL_SPREAD_PCT (obisflow's earnings on it)
   tier     = 20%, 28% or 35%, by referrals who traded real money in the
              30 days to the end of that week: 1-9, 10-49, 50 or more
   amount   = spread x tier
@@ -21,7 +21,7 @@ from .. import db
 from ..config import get_settings
 from ..util import NAIROBI, reference, usd
 
-log = logging.getLogger("orbisflow.referrals")
+log = logging.getLogger("obisflow.referrals")
 TIERS = ((50, Decimal("35")), (10, Decimal("28")), (1, Decimal("20")))
 
 

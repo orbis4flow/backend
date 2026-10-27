@@ -1,5 +1,5 @@
 -- =============================================================================
--- orbisflow · 004 · notifications, automatic USDT deposits, referral earnings
+-- obisflow · 004 · notifications, automatic USDT deposits, referral earnings
 -- Run after 003, in the Supabase SQL editor. Safe to re-run.
 -- =============================================================================
 
@@ -54,7 +54,7 @@ create table if not exists app.referral_earnings (
   week_start     date           not null,
   active         integer        not null default 0,   -- referrals who traded real money that week
   volume         numeric(14, 2) not null default 0,   -- their real-money stakes
-  spread         numeric(14, 2) not null default 0,   -- what orbisflow earned on it
+  spread         numeric(14, 2) not null default 0,   -- what obisflow earned on it
   tier_pct       numeric(5, 2)  not null default 0,   -- the referrer's share, 20 / 28 / 35
   amount         numeric(14, 2) not null default 0,   -- the referrer's earnings
   status         text           not null default 'pending' check (status in ('pending', 'paid')),

@@ -19,7 +19,7 @@ import httpx
 from .. import db
 from ..config import get_settings
 
-log = logging.getLogger("orbisflow.monitor")
+log = logging.getLogger("obisflow.monitor")
 
 EVERY_S = 300
 NAIROBI = ZoneInfo("Africa/Nairobi")     # days on the status page are Kenyan days

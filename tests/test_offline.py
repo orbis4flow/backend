@@ -111,7 +111,7 @@ def test_paystack_signature(monkeypatch):
 # ---------------------------------------------------------------------- api --
 def test_rates_reflect_the_rules():
     r = client.get("/rates").json()
-    assert r["minDepositUsd"] == 2 and r["minWithdrawUsd"] == 5 and r["withdrawFeeUsd"] == 1
+    assert r["minDepositUsd"] == 5 and r["minWithdrawUsd"] == 5 and r["withdrawFeeUsd"] == 1
 
 
 def test_signed_in_routes_need_a_token():
@@ -164,7 +164,8 @@ def test_signup_rejects_an_unknown_referral_code(monkeypatch):
         return None
     monkeypatch.setattr(profiles, "referrer_id", none)
     r = client.post("/auth/signup", json={"name": "Ada", "email": "ada@example.com",
-                                          "password": "longenough", "referral_code": "ORBIS-ZZZZZ"})
+                                          "password": "longenough", "phone": "0712345678",
+                                          "referral_code": "ORBIS-ZZZZZ"})
     assert r.status_code == 400 and "referral" in r.json()["detail"].lower()
 
 
@@ -174,22 +175,30 @@ def test_signup_with_email_confirmation(monkeypatch):
     async def fake_sign_up(email, password, data, redirect_to):
         return {"id": "u1", "email": email, "identities": [{"id": "i1"}]}
 
-    async def fake_ensure(uid, email, name=None, ref=None):
-        made.update(uid=uid, email=email, name=name)
+    async def fake_ensure(uid, email, name=None, ref=None, phone=None):
+        made.update(uid=uid, email=email, name=name, phone=phone)
         return {}
 
     monkeypatch.setattr(auth_router.supabase_auth, "sign_up", fake_sign_up)
     monkeypatch.setattr(profiles, "ensure", fake_ensure)
-    r = client.post("/auth/signup", json={"name": "Ada", "email": "ada@example.com", "password": "longenough"})
+    r = client.post("/auth/signup", json={"name": "Ada", "email": "ada@example.com", "password": "longenough",
+                                          "phone": "0712 345 678"})
     assert r.status_code == 200 and r.json() == {"confirm_email": True, "email": "ada@example.com"}
-    assert made == {"uid": "u1", "email": "ada@example.com", "name": "Ada"}
+    assert made == {"uid": "u1", "email": "ada@example.com", "name": "Ada", "phone": "+254712345678"}
+
+
+def test_signup_rejects_a_bad_phone():
+    r = client.post("/auth/signup", json={"name": "Ada", "email": "ada@example.com", "password": "longenough",
+                                          "phone": "12345678"})
+    assert r.status_code == 400 and "phone" in r.json()["detail"].lower()
 
 
 def test_signup_existing_email(monkeypatch):
     async def fake_sign_up(email, password, data, redirect_to):
         return {"id": "u1", "email": email, "identities": []}
     monkeypatch.setattr(auth_router.supabase_auth, "sign_up", fake_sign_up)
-    r = client.post("/auth/signup", json={"name": "Ada", "email": "ada@example.com", "password": "longenough"})
+    r = client.post("/auth/signup", json={"name": "Ada", "email": "ada@example.com", "password": "longenough",
+                                          "phone": "0712345678"})
     assert r.status_code == 409
 
 

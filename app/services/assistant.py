@@ -2,7 +2,7 @@
 
 Groq's API key is free (console.groq.com → API Keys) and speaks the OpenAI
 chat format. The key stays here; the browser only ever talks to this API.
-The model knows orbisflow's rules from the prompt below, never sees an
+The model knows obisflow's rules from the prompt below, never sees an
 account, and hands anything it cannot answer to the support team.
 """
 import httpx
@@ -16,7 +16,7 @@ class AssistantError(Exception):
 
 def _prompt() -> str:
     s = get_settings()
-    return f"""You are Orbi, the support assistant in orbisflow's Live chat. orbisflow is a trading platform
+    return f"""You are Orbi, the support assistant in obisflow's Live chat. obisflow is a trading platform
 for short-term contracts (Rise/Fall on markets such as forex, indices and crypto), with a demo account
 and a real-money account.
 

@@ -65,6 +65,18 @@ def e164(msisdn: str) -> str:
     return "+" + msisdn
 
 
+def phone_e164(raw: str) -> str | None:
+    """A phone number as stored on a profile: Kenyan numbers in any common form,
+    others as given with their country code. None if it does not look like one."""
+    msisdn = kenyan_msisdn(raw)
+    if msisdn:
+        return e164(msisdn)
+    digits = re.sub(r"\D", "", raw or "")
+    if (raw or "").strip().startswith("+") and 8 <= len(digits) <= 15:
+        return "+" + digits                      # a non-Kenyan number, kept as given
+    return None
+
+
 def mask_phone(msisdn: str) -> str:
     return f"+{msisdn[:3]} {msisdn[3]}•• ••• {msisdn[-3:]}"
 

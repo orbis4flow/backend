@@ -1,6 +1,6 @@
 """Paystack: card deposits on Paystack's hosted checkout.
 
-Card details never touch orbisflow. We start a transaction, send the user to
+Card details never touch obisflow. We start a transaction, send the user to
 Paystack's page, and credit the account when Paystack confirms, either on
 the signed webhook or when the user returns and we verify the reference.
 """

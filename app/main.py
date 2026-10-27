@@ -1,4 +1,4 @@
-"""orbisflow API.
+"""obisflow API.
 
 Run locally:   uvicorn app.main:app --reload
 On Render:     see render.yaml
@@ -23,7 +23,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-log = logging.getLogger("orbisflow")
+log = logging.getLogger("obisflow")
 
 
 @asynccontextmanager
@@ -43,7 +43,7 @@ async def lifespan(_: FastAPI):
 
 settings = get_settings()
 app = FastAPI(
-    title="orbisflow API",
+    title="obisflow API",
     version="1.0.0",
     lifespan=lifespan,
     docs_url="/docs" if settings.is_dev else None,     # no public API explorer in production

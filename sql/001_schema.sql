@@ -1,5 +1,5 @@
 -- =============================================================================
--- orbisflow · 001 · schema
+-- obisflow · 001 · schema
 -- Run once in the Supabase SQL editor (Dashboard → SQL Editor → New query).
 -- Safe to re-run: every statement is "if not exists" / "or replace".
 --

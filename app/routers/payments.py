@@ -27,7 +27,7 @@ from ..util import kenyan_msisdn, kes_down, kes_up, mask_phone, reference, show_
 from .payment_methods import upsert_mpesa
 
 router = APIRouter(tags=["payments"])
-log = logging.getLogger("orbisflow.payments")
+log = logging.getLogger("obisflow.payments")
 
 METHOD_LABEL = {"mpesa": "M-Pesa", "card": "Card", "bank": "Bank transfer", "usdt": "USDT (TRC-20)",
                 "referral": "Referral earnings"}
@@ -272,7 +272,7 @@ async def _confirm_withdrawal(user: AuthUser, code: str | None) -> None:
     if not (s.sms_ready if channel == "sms" else s.email_ready):
         # no way to deliver a code yet (no Resend / Africa's Talking key): the
         # withdrawal still waits for manual review, so it goes ahead
-        logging.getLogger("orbisflow.payments").warning("withdrawal code skipped: no %s provider", channel)
+        logging.getLogger("obisflow.payments").warning("withdrawal code skipped: no %s provider", channel)
         return
     if not code:
         sent = await otp.issue(user.id, "withdrawal", channel)

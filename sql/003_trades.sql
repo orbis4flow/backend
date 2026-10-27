@@ -1,5 +1,5 @@
 -- =============================================================================
--- orbisflow · 003 · trades
+-- obisflow · 003 · trades
 -- Run after 001 and 002, in the Supabase SQL editor. Safe to re-run.
 --
 -- One row per contract. Placing a trade takes the stake from the account in

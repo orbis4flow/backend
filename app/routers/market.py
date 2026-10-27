@@ -21,7 +21,7 @@ from fastapi import APIRouter
 from ..config import get_settings
 
 router = APIRouter(tags=["market data"])
-log = logging.getLogger("orbisflow.market")
+log = logging.getLogger("obisflow.market")
 
 _cache: dict[str, tuple[float, object]] = {}
 _locks: dict[str, asyncio.Lock] = {}
@@ -93,7 +93,7 @@ IMPACT = {"High": "High", "Medium": "Med", "Low": "Low", "Holiday": "Low"}
 
 
 async def _fetch_calendar() -> list[dict]:
-    async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "orbisflow/1.0"}) as c:
+    async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "obisflow/1.0"}) as c:
         r = await c.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json")
         r.raise_for_status()
         rows = r.json() or []

@@ -25,7 +25,7 @@ from .. import db
 from ..config import get_settings
 from . import ledger
 
-log = logging.getLogger("orbisflow.tron")
+log = logging.getLogger("obisflow.tron")
 MICRO = Decimal("1000000")          # USDT on TRON has 6 decimals
 _last_scan = 0.0
 _scan_lock = asyncio.Lock()

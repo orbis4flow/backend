@@ -58,8 +58,8 @@ async def stk_push(*, amount_kes: int, msisdn: str, reference: str, customer_nam
         "currency": "KES",
         "reference": reference,
         "notification_url": notification_url(),
-        "description": "orbisflow deposit",
-        "customer": {"name": customer_name or "orbisflow client", "email": email},
+        "description": "obisflow deposit",
+        "customer": {"name": customer_name or "obisflow client", "email": email},
         "mobile_money": {"number": msisdn},
     })
 
@@ -75,10 +75,10 @@ async def checkout(*, amount_kes: int, reference: str, customer_name: str, email
         "reference": reference,
         "redirect_url": redirect_url,
         "notification_url": notification_url(),
-        "narration": "orbisflow deposit",
+        "narration": "obisflow deposit",
         "channels": ["mobile_money"],
         "default_channel": "mobile_money",
-        "customer": {"name": customer_name or "orbisflow client", "email": email},
+        "customer": {"name": customer_name or "obisflow client", "email": email},
     })
 
 

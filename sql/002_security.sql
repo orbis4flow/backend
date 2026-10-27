@@ -1,5 +1,5 @@
 -- =============================================================================
--- orbisflow · 002 · lock the app schema down
+-- obisflow · 002 · lock the app schema down
 -- Run after 001. Safe to re-run.
 --
 -- The backend connects as `postgres` (the table owner), which is unaffected.

@@ -9,6 +9,7 @@ from ..config import get_settings
 from .. import db
 from ..security import AuthUser, bearer, current_user, pending_user
 from ..services import otp, profiles, sessions
+from ..util import phone_e164
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -17,6 +18,8 @@ class SignUp(BaseModel):
     name: str = Field(min_length=2, max_length=80)
     email: EmailStr
     password: str = Field(min_length=8, max_length=72)
+    # the number M-Pesa prompts by default; several accounts may share one
+    phone: str = Field(min_length=7, max_length=20)
     referral_code: str | None = Field(default=None, max_length=20)
 
 
@@ -46,7 +49,7 @@ async def _session(s: dict) -> dict:
     u = s["user"]
     meta = u.get("user_metadata") or {}
     p = await profiles.ensure(u["id"], u.get("email") or "", meta.get("full_name") or meta.get("name"),
-                              meta.get("referral_code"))
+                              meta.get("referral_code"), meta.get("phone"))
     account = await profiles.real_account_id(str(p["id"]))
     return {
         "access_token": s["access_token"],
@@ -62,10 +65,13 @@ async def sign_up(body: SignUp):
     code = (body.referral_code or "").strip().upper() or None
     if code and not await profiles.referrer_id(code):
         raise HTTPException(status_code=400, detail="That referral code does not exist. Check it, or leave it empty.")
+    phone = phone_e164(body.phone)
+    if not phone:
+        raise HTTPException(status_code=400, detail="That phone number does not look right. Use 07XX XXX XXX or include the country code.")
 
     res = await supabase_auth.sign_up(
         body.email, body.password,
-        {"full_name": body.name.strip(), "referral_code": code},
+        {"full_name": body.name.strip(), "referral_code": code, "phone": phone},
         redirect_to=f"{s.frontend_url}/login?confirmed=1",
     )
 
@@ -76,7 +82,7 @@ async def sign_up(body: SignUp):
     # Supabase answers an existing email with a user that has no identities
     if not user.get("identities"):
         raise HTTPException(status_code=409, detail="An account with this email already exists. Log in instead.")
-    await profiles.ensure(user["id"], user.get("email") or body.email, body.name, code)
+    await profiles.ensure(user["id"], user.get("email") or body.email, body.name, code, phone)
     return {"confirm_email": True, "email": body.email}
 
 

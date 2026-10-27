@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from .. import db
 from ..security import AuthUser, current_user
 from ..services import profiles
-from ..util import e164, kenyan_msisdn
+from ..util import phone_e164
 
 router = APIRouter(tags=["profile"])
 
@@ -36,13 +36,8 @@ async def update_me(body: ProfileUpdate, user: AuthUser = Depends(current_user))
         if body.phone.strip() == "":
             fields["phone"] = None
         else:
-            msisdn = kenyan_msisdn(body.phone)
-            digits = "".join(ch for ch in body.phone if ch.isdigit())
-            if msisdn:
-                fields["phone"] = e164(msisdn)
-            elif body.phone.strip().startswith("+") and 8 <= len(digits) <= 15:
-                fields["phone"] = "+" + digits          # a non-Kenyan number, kept as given
-            else:
+            fields["phone"] = phone_e164(body.phone)
+            if not fields["phone"]:
                 raise HTTPException(status_code=400, detail="That phone number does not look right. Include the country code.")
     if body.country_code is not None:
         fields["country_code"] = body.country_code.lower()

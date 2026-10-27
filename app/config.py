@@ -11,7 +11,7 @@ class Settings(BaseSettings):
 
     # ------------------------------------------------------------- app ---
     env: str = "production"                       # "development" relaxes a few checks
-    frontend_url: str = "https://orbisflow.com"   # links in emails, referral links, returns
+    frontend_url: str = "https://obisflow.com"   # links in emails, referral links, returns
     public_api_url: str = ""                      # this API's own URL; Render sets RENDER_EXTERNAL_URL
     cors_origins: str = ""                        # extra origins, comma separated (FRONTEND_URL is always allowed)
 
@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     # ---------------------------------------------------------- money ---
     usd_kes_rate: float = 129.5                   # what M-Pesa amounts are converted at
-    min_deposit_usd: float = 2.0
+    min_deposit_usd: float = 5.0
     max_deposit_usd: float = 10000.0
     min_withdraw_usd: float = 5.0
     withdraw_fee_usd: float = 1.0                 # charged on top of the amount withdrawn
@@ -54,8 +54,8 @@ class Settings(BaseSettings):
 
     # ----------------------------------------------------- email (Resend) ---
     resend_api_key: str = ""
-    email_from: str = "orbisflow <no-reply@orbisflow.com>"   # a sender on a domain verified in Resend
-    support_email: str = "support@orbisflow.com"
+    email_from: str = "obisflow <no-reply@obisflow.com>"   # a sender on a domain verified in Resend
+    support_email: str = "support@obisflow.com"
 
     # --------------------------------------------- SMS (Africa's Talking) ---
     at_username: str = ""                          # "sandbox" while testing
@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     usdt_request_minutes: int = 120                # how long an exact-amount request stays open
 
     # ------------------------------------------------- referral earnings ---
-    referral_spread_pct: float = 0.75              # orbisflow's spread, as a share of real-money volume
+    referral_spread_pct: float = 0.75              # obisflow's spread, as a share of real-money volume
 
     @field_validator("frontend_url", "public_api_url", "supabase_url")
     @classmethod

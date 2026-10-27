@@ -24,7 +24,7 @@ async def referrer_id(code: str | None, conn: AsyncConnection | None = None) -> 
 
 
 async def ensure(user_id: str, email: str, full_name: str | None = None,
-                 ref_code: str | None = None) -> dict:
+                 ref_code: str | None = None, phone: str | None = None) -> dict:
     """The user's profile, created on first sight with its accounts and code."""
     row = await db.one("select * from app.profiles where id = %s", (user_id,))
     if row:
@@ -40,10 +40,10 @@ async def ensure(user_id: str, email: str, full_name: str | None = None,
             try:
                 async with conn.transaction():      # a savepoint, so a clash can retry
                     ins = await conn.execute(
-                        """insert into app.profiles (id, email, full_name, referral_code, referred_by)
-                           values (%s, %s, %s, %s, %s)
+                        """insert into app.profiles (id, email, full_name, phone, referral_code, referred_by)
+                           values (%s, %s, %s, %s, %s, %s)
                            on conflict (id) do nothing""",
-                        (user_id, email, (full_name or "").strip() or None, referral_code(), ref),
+                        (user_id, email, (full_name or "").strip() or None, phone or None, referral_code(), ref),
                     )
                     created = ins.rowcount > 0
                 break
@@ -70,7 +70,7 @@ async def for_user(user: AuthUser) -> dict:
     """The profile behind a verified token, creating it if this is the first call
     (a Google sign-in, or a sign-up that needed email confirmation)."""
     return await ensure(user.id, user.email, user.meta.get("full_name") or user.meta.get("name"),
-                        user.meta.get("referral_code"))
+                        user.meta.get("referral_code"), user.meta.get("phone"))
 
 
 def public(p: dict, account_id: str | None = None) -> dict:

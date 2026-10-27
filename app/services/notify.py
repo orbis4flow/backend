@@ -16,7 +16,7 @@ import httpx
 from .. import db
 from ..config import get_settings
 
-log = logging.getLogger("orbisflow.notify")
+log = logging.getLogger("obisflow.notify")
 _tasks: set[asyncio.Task] = set()
 
 
@@ -63,7 +63,7 @@ def _page(title: str, lines: list[str], rows: list[tuple[str, str]] | None = Non
         '<table role="presentation" width="100%" style="background:#fafaf9;padding:28px 12px"><tr><td align="center">'
         '<table role="presentation" width="100%" style="max-width:520px;background:#ffffff;border:1px solid #e8e6e1">'
         '<tr><td style="padding:22px 26px;border-bottom:1px solid #ecebe7;font-size:18px;font-weight:700;color:#1c1c1c">'
-        'orbis<span style="border-bottom:2px solid #00BF63">flow</span></td></tr>'
+        'obis<span style="border-bottom:2px solid #00BF63">flow</span></td></tr>'
         f'<tr><td style="padding:26px"><h1 style="margin:0 0 14px;font-size:20px;color:#1c1c1c">{html.escape(title)}</h1>'
         f'{body}{table}{btn}</td></tr>'
         '<tr><td style="padding:18px 26px;border-top:1px solid #ecebe7;font-size:12px;line-height:1.6;color:#93928c">'
@@ -147,7 +147,7 @@ async def welcome(user_id) -> None:
         return
     s = get_settings()
     first = (p["full_name"] or "").split(" ")[0] or "there"
-    email(p["id"], "welcome", p["email"], "Welcome to orbisflow",
+    email(p["id"], "welcome", p["email"], "Welcome to obisflow",
           f"Welcome, {html.escape(first)}",
           ["Your account is ready, with <b>$10,000</b> in demo funds to practise on before you risk anything real.",
            "When you are ready for real money, deposit by M-Pesa, card or USDT from the account menu."],
@@ -167,7 +167,7 @@ async def deposit_received(tx: dict) -> None:
           "Your deposit has arrived", [f"{_money(tx['net_usd'])} is in your real account and ready to trade."],
           rows, ("View cashier", f"{s.frontend_url}/cashier"))
     sms(p["id"], "deposit_received", p["phone"],
-        f"orbisflow: deposit of {_money(tx['net_usd'])} received via {method}. Ref {tx['reference']}.")
+        f"obisflow: deposit of {_money(tx['net_usd'])} received via {method}. Ref {tx['reference']}.")
 
 
 async def withdrawal_requested(tx: dict) -> None:
@@ -183,7 +183,7 @@ async def withdrawal_requested(tx: dict) -> None:
           [("Amount", _money(tx["amount_usd"])), ("Fee", _money(tx["fee_usd"])),
            ("Taken from balance", _money(tx["net_usd"])), ("Reference", tx["reference"])])
     sms(p["id"], "withdrawal_requested", p["phone"],
-        f"orbisflow: withdrawal of {local} requested. Ref {tx['reference']}. Not you? Contact support now.")
+        f"obisflow: withdrawal of {local} requested. Ref {tx['reference']}. Not you? Contact support now.")
 
 
 async def method_added(user_id, label: str, masked: str) -> None:
@@ -204,7 +204,7 @@ async def referral_paid(user_id, amount, period: str) -> None:
     email(p["id"], "referral_paid", p["email"], f"Referral earnings paid: {_money(amount)}",
           "Your referral earnings are in", [f"{_money(amount)} for {html.escape(period)} is now in your real balance."],
           button=("See earnings", f"{s.frontend_url}/referral-earnings"))
-    sms(p["id"], "referral_paid", p["phone"], f"orbisflow: referral earnings of {_money(amount)} paid to your balance.")
+    sms(p["id"], "referral_paid", p["phone"], f"obisflow: referral earnings of {_money(amount)} paid to your balance.")
 
 
 
@@ -213,14 +213,14 @@ async def code_now(user_id, channel: str, to: str, code: str, purpose_text: str)
     """A one-time code, sent while the caller waits: it has to know whether it
     went, because the person on the other end is waiting for it."""
     if channel == "sms":
-        return await _send_sms(user_id, "otp", to, f"orbisflow code: {code}. It {purpose_text} and expires "
+        return await _send_sms(user_id, "otp", to, f"obisflow code: {code}. It {purpose_text} and expires "
                                                     "in 10 minutes. Never share it with anyone.")
     lines = [f"Your code is <b style=\"font-size:22px;letter-spacing:4px;font-family:Consolas,monospace\">{code}</b>",
              f"It {html.escape(purpose_text)} and expires in 10 minutes.",
-             "orbisflow will never ask you for this code. If you did not ask for it, change your password."]
-    text = f"Your orbisflow code is {code}. It {purpose_text} and expires in 10 minutes."
+             "obisflow will never ask you for this code. If you did not ask for it, change your password."]
+    text = f"Your obisflow code is {code}. It {purpose_text} and expires in 10 minutes."
     # the code stays out of the subject: subjects are kept in app.notifications
-    return await _send_email(user_id, "otp", to, "Your orbisflow code", _page("Your code", lines), text)
+    return await _send_email(user_id, "otp", to, "Your obisflow code", _page("Your code", lines), text)
 
 
 async def login_alert(user_id, device: str, ip: str | None) -> None:
@@ -228,7 +228,7 @@ async def login_alert(user_id, device: str, ip: str | None) -> None:
     if not p:
         return
     s = get_settings()
-    email(p["id"], "login_alert", p["email"], "New sign-in to your orbisflow account",
+    email(p["id"], "login_alert", p["email"], "New sign-in to your obisflow account",
           "A new device signed in",
           [f"Your account was just opened on <b>{html.escape(device or 'a new device')}</b>.",
            "If this was you, there is nothing to do. If not, sign that session out and change your password now."],
@@ -240,7 +240,7 @@ async def password_changed(user_id) -> None:
     p = await _person(user_id)
     if not p:
         return
-    email(p["id"], "password_changed", p["email"], "Your orbisflow password was changed",
+    email(p["id"], "password_changed", p["email"], "Your obisflow password was changed",
           "Password changed",
           ["The password on your account was just changed, and every other device was signed out.",
            "If you did not do this, reset your password straight away and contact support."])

@@ -11,7 +11,7 @@ from decimal import Decimal
 from .. import db
 from . import kora, ledger, payhero, paystack
 
-log = logging.getLogger("orbisflow.settle")
+log = logging.getLogger("obisflow.settle")
 
 
 async def by_reference(reference: str) -> dict | None:
