@@ -175,7 +175,7 @@ def test_signup_with_email_confirmation(monkeypatch):
     async def fake_sign_up(email, password, data, redirect_to):
         return {"id": "u1", "email": email, "identities": [{"id": "i1"}]}
 
-    async def fake_ensure(uid, email, name=None, ref=None, phone=None):
+    async def fake_ensure(uid, email, name=None, ref=None, phone=None, provider=None):
         made.update(uid=uid, email=email, name=name, phone=phone)
         return {}
 
@@ -398,4 +398,24 @@ def test_admin_api_refuses_wrong_tokens_then_locks_out(monkeypatch):
     for _ in range(8):
         client.get("/admin/overview")
     assert client.get("/admin/overview", headers={"Authorization": "Bearer " + "x" * 40}).status_code == 429
+    admin_router._misses.clear()
+
+
+def test_event_log_never_fails_the_request(monkeypatch):
+    import asyncio
+    from app.services import events
+
+    async def broken(*a, **k):
+        raise RuntimeError("database down")
+    monkeypatch.setattr(events.db, "run", broken)
+    asyncio.run(events.record("mpesa.stk", False, detail="x" * 900))      # no exception
+
+
+def test_admin_logs_need_the_token(monkeypatch):
+    from app.config import get_settings
+    from app.routers import admin as admin_router
+    monkeypatch.setattr(get_settings(), "admin_token", "x" * 40)
+    admin_router._misses.clear()
+    assert client.get("/admin/logs").status_code == 401
+    assert client.get("/admin/logs/summary").status_code == 401
     admin_router._misses.clear()

@@ -23,6 +23,7 @@ class AuthUser:
     email: str
     token: str
     meta: dict = field(default_factory=dict)
+    provider: str = ""                     # how the account signs in: "email", "google"
     session_id: str | None = None          # Supabase's session, one per signed-in device
 
 
@@ -46,7 +47,8 @@ def _jwks_client() -> jwt.PyJWKClient:
 
 def _from_claims(claims: dict, token: str) -> AuthUser:
     return AuthUser(id=claims["sub"], email=claims.get("email") or "", token=token,
-                    meta=claims.get("user_metadata") or {}, session_id=claims.get("session_id"))
+                    meta=claims.get("user_metadata") or {}, session_id=claims.get("session_id"),
+                    provider=(claims.get("app_metadata") or {}).get("provider") or "")
 
 
 async def verify(token: str) -> AuthUser:

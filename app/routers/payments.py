@@ -10,6 +10,7 @@ Limits: deposits from MIN_DEPOSIT_USD, withdrawals from MIN_WITHDRAW_USD
 with WITHDRAW_FEE_USD charged on top of the amount.
 """
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -22,12 +23,17 @@ from ..config import get_settings
 from ..security import AuthUser, current_user
 from psycopg.errors import UniqueViolation
 
-from ..services import kora, ledger, limits, notify, otp, payhero, paystack, profiles, settle, tron
+from ..services import events, kora, ledger, limits, notify, otp, payhero, paystack, profiles, settle, tron
 from ..util import kenyan_msisdn, kes_down, kes_up, mask_phone, reference, show_date, usd
 from .payment_methods import upsert_mpesa
 
 router = APIRouter(tags=["payments"])
 log = logging.getLogger("obisflow.payments")
+
+
+def _ms(start: float) -> int:
+    """Milliseconds since `start`, for how long a provider took (services/events.py)."""
+    return int((time.monotonic() - start) * 1000)
 
 METHOD_LABEL = {"mpesa": "M-Pesa", "card": "Card", "bank": "Bank transfer", "usdt": "USDT (TRC-20)",
                 "referral": "Referral earnings"}
@@ -151,32 +157,45 @@ async def deposit_mpesa(body: MpesaDeposit, user: AuthUser = Depends(current_use
 
     if provider == "kora":
         # 1 · Kora's push, straight to the phone
+        t0 = time.monotonic()
         try:
             res = await kora.stk_push(amount_kes=kes, msisdn=msisdn, reference=ref, customer_name=name, email=p["email"])
+            await events.record("mpesa.stk", True, provider="kora", ref=ref, user_id=user.id, ms=_ms(t0),
+                                detail=f"prompt sent to {mask_phone(msisdn)}")
             return public(await processing("kora", res.get("transaction_reference") or ref, {"stk": res, "kora_ref": ref}))
         except kora.KoraError as e:
             log.warning("kora push refused for %s: %s", ref, e)
+            await events.record("mpesa.stk", False, provider="kora", ref=ref, user_id=user.id, ms=_ms(t0), detail=str(e))
             tried.append(f"Kora push: {e}")
 
         # 2 · Kora's hosted checkout; the user pays on Kora's page and comes back
         kref = ref + kora.CHECKOUT_SUFFIX
+        t0 = time.monotonic()
         try:
             res = await kora.checkout(amount_kes=kes, reference=kref, customer_name=name, email=p["email"],
                                       redirect_url=f"{s.frontend_url}/cashier?deposit={ref}")
             out = public(await processing("kora", kref, {"checkout": res, "kora_ref": kref}))
             out["checkoutUrl"] = res["checkout_url"]
+            await events.record("mpesa.checkout", True, provider="kora", ref=ref, user_id=user.id, ms=_ms(t0),
+                                detail="push refused, sent to Kora's checkout page")
             return out
         except (kora.KoraError, KeyError) as e:
             log.warning("kora checkout refused for %s: %s", ref, e)
+            await events.record("mpesa.checkout", False, provider="kora", ref=ref, user_id=user.id, ms=_ms(t0),
+                                detail=str(e))
             tried.append(f"Kora checkout: {e}")
 
     # 3 · PayHero's push
     if s.payhero_ready:
+        t0 = time.monotonic()
         try:
             res = await payhero.stk_push(amount_kes=kes, msisdn=msisdn, reference=ref, customer_name=name)
+            await events.record("mpesa.stk", True, provider="payhero", ref=ref, user_id=user.id, ms=_ms(t0),
+                                detail=f"prompt sent to {mask_phone(msisdn)}")
             return public(await processing("payhero", res.get("reference") or res.get("CheckoutRequestID"), {"stk": res}))
         except payhero.PayHeroError as e:
             log.warning("payhero push refused for %s: %s", ref, e)
+            await events.record("mpesa.stk", False, provider="payhero", ref=ref, user_id=user.id, ms=_ms(t0), detail=str(e))
             tried.append(f"PayHero: {e}")
 
     await ledger.fail_deposit(ref, "; ".join(tried) or "No M-Pesa provider is available")
@@ -208,14 +227,18 @@ async def deposit_card(body: CardDeposit, user: AuthUser = Depends(current_user)
                       fx_rate=Decimal(str(s.usd_kes_rate)) if currency != "USD" else None, reference=ref,
                       meta=Jsonb({"amount_minor": minor, "currency": currency}))
 
+    t0 = time.monotonic()
     try:
         res = await paystack.initialize(
             email=p["email"], amount_minor=minor, currency=currency, reference=ref,
             callback_url=f"{s.frontend_url}/cashier?deposit={ref}",
             metadata={"user_id": user.id, "reference": ref, "amount_usd": str(amount)})
     except paystack.PaystackError as e:
+        await events.record("card.checkout", False, provider="paystack", ref=ref, user_id=user.id, ms=_ms(t0), detail=str(e))
         await ledger.fail_deposit(ref, str(e))
         raise HTTPException(status_code=502, detail=f"Card checkout could not be opened: {e}")
+    await events.record("card.checkout", True, provider="paystack", ref=ref, user_id=user.id, ms=_ms(t0),
+                        detail=f"checkout opened for {currency} {local}")
 
     await db.run("update app.transactions set provider_ref = %s, meta = meta || %s where reference = %s",
                  (res.get("reference") or ref, Jsonb({"access_code": res.get("access_code")}), ref))
@@ -320,6 +343,8 @@ async def withdraw(body: Withdrawal, user: AuthUser = Depends(current_user)):
                            reference=ref, destination=m["masked"], meta=Jsonb({}))
 
     notify._later(notify.withdrawal_requested(tx))
+    await events.record("withdrawal.request", True, provider=m["kind"], ref=ref, user_id=user.id,
+                        detail=f"${amount} to {m['masked']}, waiting for review")
     return public(tx)
 
 

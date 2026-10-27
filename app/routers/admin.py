@@ -306,6 +306,64 @@ async def trades(account: Literal["real", "demo", "all"] = "real", status: Liter
     return [_trade(t) for t in rows]
 
 
+# -------------------------------------------------------------------- logs --
+# app.events (services/events.py) for payments, callbacks, sign-ups and feeds;
+# app.notifications for emails and SMS, read here as kinds "email" and "sms".
+_NOTES = """select 'notify.' || n.channel as kind, n.status = 'sent' as ok, n.channel as provider,
+                   n.kind as ref, n.user_id, n.to_address, n.subject,
+                   case when n.status = 'sent' then n.kind || ' to ' || n.to_address
+                        else n.status || ': ' || coalesce(n.error, n.kind) end as detail,
+                   null::integer as ms, n.created_at, p.email
+              from app.notifications n left join app.profiles p on p.id = n.user_id"""
+
+
+@router.get("/logs/summary")
+async def logs_summary(hours: int = Query(default=24, ge=1, le=24 * 30), _: str = Depends(admin)):
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    rows = await db.many(
+        """select kind, count(*) as total, count(*) filter (where not ok) as failed,
+                  max(created_at) as last_at, max(created_at) filter (where not ok) as last_failed_at,
+                  round(avg(ms) filter (where ms is not null)) as avg_ms
+             from app.events where created_at >= %s group by kind""", (since,))
+    notes = await db.many(
+        """select 'notify.' || channel as kind, count(*) as total, count(*) filter (where status = 'failed') as failed,
+                  max(created_at) as last_at, max(created_at) filter (where status = 'failed') as last_failed_at,
+                  null as avg_ms
+             from app.notifications where created_at >= %s group by channel""", (since,))
+    last = await db.many(
+        """select distinct on (kind) kind, detail from app.events
+            where not ok and created_at >= %s order by kind, created_at desc""", (since,))
+    last_note = await db.many(
+        """select distinct on (channel) 'notify.' || channel as kind, coalesce(error, kind) as detail
+             from app.notifications where status = 'failed' and created_at >= %s
+            order by channel, created_at desc""", (since,))
+    why = {r["kind"]: r["detail"] for r in [*last, *last_note]}
+    return [{"kind": r["kind"], "total": r["total"], "failed": r["failed"], "lastAt": _iso(r["last_at"]),
+             "lastFailedAt": _iso(r["last_failed_at"]), "lastError": why.get(r["kind"]),
+             "avgMs": int(r["avg_ms"]) if r["avg_ms"] is not None else None} for r in [*rows, *notes]]
+
+
+@router.get("/logs")
+async def logs(kind: str = "", failed: bool = False, limit: int = Query(default=200, ge=1, le=500),
+               _: str = Depends(admin)):
+    """The latest events, newest first; `kind` a full kind (mpesa.stk) or a group (mpesa, webhook, notify)."""
+    where, args = ["true"], []
+    if kind:
+        where.append("(x.kind = %s or x.kind like %s)"); args += [kind, kind + ".%"]
+    if failed:
+        where.append("not x.ok")
+    rows = await db.many(
+        f"""select * from (
+              select e.kind, e.ok, e.provider, e.ref, e.user_id, e.detail, e.ms, e.created_at, p.email
+                from app.events e left join app.profiles p on p.id = e.user_id
+              union all
+              select kind, ok, provider, ref, user_id, detail, ms, created_at, email from ({_NOTES}) n
+            ) x where {' and '.join(where)} order by x.created_at desc limit %s""", (*args, limit))
+    return [{"kind": r["kind"], "ok": r["ok"], "provider": r["provider"], "ref": r["ref"],
+             "userId": str(r["user_id"]) if r["user_id"] else None, "email": r["email"], "detail": r["detail"],
+             "ms": r["ms"], "at": _iso(r["created_at"])} for r in rows]
+
+
 # ------------------------------------------------------------------ system --
 @router.get("/actions")
 async def actions(limit: int = Query(default=100, ge=1, le=500), _: str = Depends(admin)):

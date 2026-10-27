@@ -17,7 +17,7 @@ from psycopg.types.json import Jsonb
 
 from .. import db
 from ..config import get_settings
-from ..services import kora, paystack, settle
+from ..services import events, kora, paystack, settle
 from ..services.payhero import parse_callback
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
@@ -31,8 +31,11 @@ async def _record(provider: str, reference: str | None, payload: dict) -> int:
 
 
 async def _done(event_id: int, error: str | None = None) -> None:
-    await db.run("update app.webhook_events set processed = %s, error = %s where id = %s",
-                 (error is None, error, event_id))
+    row = await db.one("update app.webhook_events set processed = %s, error = %s where id = %s returning provider, reference",
+                       (error is None, error, event_id))
+    if row:
+        await events.record(f"webhook.{row['provider']}", error is None, provider=row["provider"], ref=row["reference"],
+                            detail=error or "processed")
 
 
 @router.post("/kora")
@@ -42,6 +45,7 @@ async def kora_callback(request: Request):
     except (ValueError, json.JSONDecodeError):
         raise HTTPException(status_code=400, detail="bad payload")
     if not isinstance(payload, dict) or not kora.signature_ok(payload, request.headers.get("x-korapay-signature")):
+        await events.record("webhook.kora", False, provider="kora", detail="refused: bad signature")
         raise HTTPException(status_code=401, detail="bad signature")
     data = payload.get("data") or {}
     event = await _record("kora", data.get("reference"), payload)
@@ -63,6 +67,7 @@ async def kora_callback(request: Request):
 async def payhero_callback(request: Request, token: str = ""):
     s = get_settings()
     if not s.payhero_callback_token or not hmac.compare_digest(token, s.payhero_callback_token):
+        await events.record("webhook.payhero", False, provider="payhero", detail="refused: wrong callback token")
         raise HTTPException(status_code=403, detail="forbidden")
     try:
         payload = await request.json()
@@ -90,6 +95,7 @@ async def payhero_callback(request: Request, token: str = ""):
 async def paystack_callback(request: Request):
     raw = await request.body()
     if not paystack.signature_ok(raw, request.headers.get("x-paystack-signature")):
+        await events.record("webhook.paystack", False, provider="paystack", detail="refused: bad signature")
         raise HTTPException(status_code=401, detail="bad signature")
     payload = json.loads(raw or b"{}")
     data = payload.get("data") or {}

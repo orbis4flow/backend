@@ -177,6 +177,11 @@ def history(sym: str, seconds: int) -> list[list]:
 
 
 # ------------------------------------------------------------------ feeds --
+async def _event(source: str, ok: bool, detail: str) -> None:
+    from . import events
+    await events.record(f"feed.{source}", ok, provider=source, detail=detail[:300])
+
+
 async def _binance(stop: asyncio.Event) -> None:
     by_feed = {m.feed.lower(): m.sym for m in MARKETS.values() if m.source == "binance"}
     url = "wss://data-stream.binance.vision/stream?streams=" + "/".join(f"{f}@miniTicker" for f in by_feed)
@@ -185,6 +190,7 @@ async def _binance(stop: asyncio.Event) -> None:
         try:
             async with websockets.connect(url, ping_interval=20, open_timeout=15) as ws:
                 _alive("binance", True)
+                await _event("binance", True, "connected")
                 backoff = 1
                 async for raw in ws:
                     d = json.loads(raw).get("data") or {}
@@ -195,6 +201,7 @@ async def _binance(stop: asyncio.Event) -> None:
             raise
         except Exception as e:
             log.warning("binance feed dropped: %s", e)
+            await _event("binance", False, f"dropped: {e}")
         _alive("binance", False)
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, 30)
@@ -214,6 +221,7 @@ async def _finnhub(stop: asyncio.Event) -> None:
                 for f in by_feed:
                     await ws.send(json.dumps({"type": "subscribe", "symbol": f}))
                 _alive("finnhub", True)
+                await _event("finnhub", True, "connected")
                 backoff = 1
                 async for raw in ws:
                     msg = json.loads(raw)
@@ -227,6 +235,7 @@ async def _finnhub(stop: asyncio.Event) -> None:
             raise
         except Exception as e:
             log.warning("finnhub feed dropped: %s", e)
+            await _event("finnhub", False, f"dropped: {e}")
         _alive("finnhub", False)
         await asyncio.sleep(backoff)
         backoff = min(backoff * 4, 120)       # the free plan limits reconnects

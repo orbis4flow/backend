@@ -18,10 +18,13 @@ async def complete_deposit(reference: str, *, receipt: str | None = None,
     """Credit a deposit. Returns the new balance, or None if it was already settled."""
     done = await _complete_deposit(reference, receipt, provider_ref)
     if done:                                         # the receipt goes out once, with the credit
-        from . import notify
+        from . import events, notify
         tx = await db.one("select * from app.transactions where reference = %s", (reference,))
         if tx:
             notify._later(notify.deposit_received(tx))
+            await events.record(f"{tx['method']}.payment", True, provider=tx["provider"], ref=reference,
+                                user_id=str(tx["user_id"]),
+                                detail=f"${tx['net_usd']} credited" + (f", receipt {receipt}" if receipt else ""))
     return done
 
 
@@ -43,12 +46,17 @@ async def _complete_deposit(reference: str, receipt: str | None, provider_ref: s
 
 
 async def fail_deposit(reference: str, reason: str | None) -> bool:
-    n = await db.run(
+    tx = await db.one(
         """update app.transactions set status = 'failed', failure_reason = %s, completed_at = now()
-            where reference = %s and type = 'deposit' and status in ('pending', 'processing')""",
+            where reference = %s and type = 'deposit' and status in ('pending', 'processing')
+        returning method, provider, user_id, failure_reason""",
         ((reason or "Payment was not completed")[:300], reference),
     )
-    return n > 0
+    if tx:
+        from . import events
+        await events.record(f"{tx['method']}.payment", False, provider=tx["provider"], ref=reference,
+                            user_id=str(tx["user_id"]), detail=tx["failure_reason"])
+    return tx is not None
 
 
 async def debit_for_withdrawal(conn: AsyncConnection, user_id: str, total: Decimal) -> str | None:

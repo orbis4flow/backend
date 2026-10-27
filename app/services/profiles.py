@@ -24,7 +24,7 @@ async def referrer_id(code: str | None, conn: AsyncConnection | None = None) -> 
 
 
 async def ensure(user_id: str, email: str, full_name: str | None = None,
-                 ref_code: str | None = None, phone: str | None = None) -> dict:
+                 ref_code: str | None = None, phone: str | None = None, provider: str | None = None) -> dict:
     """The user's profile, created on first sight with its accounts and code."""
     row = await db.one("select * from app.profiles where id = %s", (user_id,))
     if row:
@@ -61,8 +61,10 @@ async def ensure(user_id: str, email: str, full_name: str | None = None,
         cur = await conn.execute("select * from app.profiles where id = %s", (user_id,))
         row = await cur.fetchone()
     if created:                                     # a new account gets its welcome email, once
-        from . import notify
+        from . import events, notify
         notify._later(notify.welcome(user_id))
+        await events.record("account.created", True, provider=provider or "email", user_id=user_id,
+                            detail=email)
     return row
 
 
@@ -70,7 +72,7 @@ async def for_user(user: AuthUser) -> dict:
     """The profile behind a verified token, creating it if this is the first call
     (a Google sign-in, or a sign-up that needed email confirmation)."""
     return await ensure(user.id, user.email, user.meta.get("full_name") or user.meta.get("name"),
-                        user.meta.get("referral_code"), user.meta.get("phone"))
+                        user.meta.get("referral_code"), user.meta.get("phone"), user.provider)
 
 
 def public(p: dict, account_id: str | None = None) -> dict:

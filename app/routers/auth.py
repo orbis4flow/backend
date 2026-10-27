@@ -8,7 +8,7 @@ from .. import supabase_auth
 from ..config import get_settings
 from .. import db
 from ..security import AuthUser, bearer, current_user, pending_user
-from ..services import otp, profiles, sessions
+from ..services import events, otp, profiles, sessions
 from ..util import phone_e164
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -49,7 +49,8 @@ async def _session(s: dict) -> dict:
     u = s["user"]
     meta = u.get("user_metadata") or {}
     p = await profiles.ensure(u["id"], u.get("email") or "", meta.get("full_name") or meta.get("name"),
-                              meta.get("referral_code"), meta.get("phone"))
+                              meta.get("referral_code"), meta.get("phone"),
+                              (u.get("app_metadata") or {}).get("provider"))
     account = await profiles.real_account_id(str(p["id"]))
     return {
         "access_token": s["access_token"],
@@ -69,20 +70,29 @@ async def sign_up(body: SignUp):
     if not phone:
         raise HTTPException(status_code=400, detail="That phone number does not look right. Use 07XX XXX XXX or include the country code.")
 
-    res = await supabase_auth.sign_up(
-        body.email, body.password,
-        {"full_name": body.name.strip(), "referral_code": code, "phone": phone},
-        redirect_to=f"{s.frontend_url}/login?confirmed=1",
-    )
+    try:
+        res = await supabase_auth.sign_up(
+            body.email, body.password,
+            {"full_name": body.name.strip(), "referral_code": code, "phone": phone},
+            redirect_to=f"{s.frontend_url}/login?confirmed=1",
+        )
+    except HTTPException as e:
+        await events.record("auth.signup", False, provider="email", detail=f"{body.email}: {e.detail}")
+        raise
 
     if res.get("access_token"):                       # email confirmation is off
-        return await _session(res)
+        out = await _session(res)
+        await events.record("auth.signup", True, provider="email", user_id=out["profile"]["id"], detail=body.email)
+        return out
 
     user = res.get("user") or res
     # Supabase answers an existing email with a user that has no identities
     if not user.get("identities"):
+        await events.record("auth.signup", False, provider="email", detail=f"{body.email}: already has an account")
         raise HTTPException(status_code=409, detail="An account with this email already exists. Log in instead.")
-    await profiles.ensure(user["id"], user.get("email") or body.email, body.name, code, phone)
+    await profiles.ensure(user["id"], user.get("email") or body.email, body.name, code, phone, "email")
+    await events.record("auth.signup", True, provider="email", user_id=user["id"],
+                        detail=f"{body.email}: confirmation email sent")
     return {"confirm_email": True, "email": body.email}
 
 
@@ -108,7 +118,13 @@ async def _second_factor(out: dict, request: Request) -> dict:
 
 @router.post("/login")
 async def sign_in(body: SignIn, request: Request):
-    return await _second_factor(await _session(await supabase_auth.sign_in(body.email, body.password)), request)
+    try:
+        out = await _session(await supabase_auth.sign_in(body.email, body.password))
+    except HTTPException as e:
+        await events.record("auth.login", False, provider="email", detail=f"{body.email}: {e.detail}")
+        raise
+    await events.record("auth.login", True, provider="email", user_id=out["profile"]["id"], detail=body.email)
+    return await _second_factor(out, request)
 
 
 @router.post("/refresh")
@@ -167,7 +183,9 @@ async def google(ref: str | None = None):
     """Where to send the browser for Google sign-in. Supabase sends it back to
     /login with the session in the URL fragment."""
     if not await supabase_auth.provider_enabled("google"):
+        await events.record("auth.google", False, provider="google", detail="Google is not switched on in Supabase")
         raise HTTPException(status_code=503, detail="Google sign-in is not switched on yet. Use your email for now.")
+    await events.record("auth.google", True, provider="google", detail="sent to Google")
     s = get_settings()
     back = f"{s.frontend_url}/login?oauth=google" + (f"&ref={ref.strip().upper()}" if ref else "")
     return {"url": supabase_auth.oauth_url("google", back)}

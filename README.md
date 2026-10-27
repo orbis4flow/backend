@@ -201,7 +201,7 @@ All JSON. Signed-in routes take `Authorization: Bearer <access_token>`. Errors a
 | POST | `/sessions/revoke-others` | sign every other device out |
 | POST | `/webhooks/kora`, `/webhooks/payhero`, `/webhooks/paystack` | provider callbacks |
 | GET | `/health` | database and provider readiness |
-| GET, POST | `/admin/*` | the admin site's API (`admin/` in the website repo); exists only with `ADMIN_TOKEN` set, needs `sql/009_admin.sql` |
+| GET, POST | `/admin/*` | the admin site's API (github.com/Deon62/adminobis); exists only with `ADMIN_TOKEN` set, needs `sql/009_admin.sql`, and `sql/010_events.sql` for its Logs page |
 | GET | `/prices` | the last price per market: `{sym: {p, t, live, dp, payout}}` |
 | GET | `/prices/history?symbol=&seconds=` | up to an hour of prices, one a second, for the chart |
 | GET | `/status` | daily uptime per service for the status page (checked every five minutes; needs `sql/007_status.sql`) |
