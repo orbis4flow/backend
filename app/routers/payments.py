@@ -160,9 +160,24 @@ async def deposit_mpesa(body: MpesaDeposit, user: AuthUser = Depends(current_use
         t0 = time.monotonic()
         try:
             res = await kora.stk_push(amount_kes=kes, msisdn=msisdn, reference=ref, customer_name=name, email=p["email"])
-            await events.record("mpesa.stk", True, provider="kora", ref=ref, user_id=user.id, ms=_ms(t0),
-                                detail=f"prompt sent to {mask_phone(msisdn)}")
-            return public(await processing("kora", res.get("transaction_reference") or ref, {"stk": res, "kora_ref": ref}))
+            # Kora says how the charge is approved: a prompt on the phone, a page to
+            # open, or an OTP first. Only STK_PROMPT means a prompt is on its way.
+            model = str(res.get("auth_model") or "STK_PROMPT").upper()
+            if model == "STK_PROMPT":
+                await events.record("mpesa.stk", True, provider="kora", ref=ref, user_id=user.id, ms=_ms(t0),
+                                    detail=f"prompt sent to {mask_phone(msisdn)}")
+                return public(await processing("kora", res.get("transaction_reference") or ref, {"stk": res, "kora_ref": ref}))
+            page = (res.get("authorization") or {}).get("redirect_url")
+            if model == "REDIRECT" and page:
+                await events.record("mpesa.stk", True, provider="kora", ref=ref, user_id=user.id, ms=_ms(t0),
+                                    detail="Kora asked for its own page (REDIRECT); sent the user there")
+                out = public(await processing("kora", res.get("transaction_reference") or ref, {"stk": res, "kora_ref": ref}))
+                out["checkoutUrl"] = page
+                return out
+            # an OTP the cashier cannot collect: Kora's checkout page asks for it instead
+            await events.record("mpesa.stk", False, provider="kora", ref=ref, user_id=user.id, ms=_ms(t0),
+                                detail=f"no prompt sent: Kora wants {model} first; trying Kora's checkout page")
+            tried.append(f"Kora push: needs {model}")
         except kora.KoraError as e:
             log.warning("kora push refused for %s: %s", ref, e)
             await events.record("mpesa.stk", False, provider="kora", ref=ref, user_id=user.id, ms=_ms(t0), detail=str(e))
@@ -177,7 +192,7 @@ async def deposit_mpesa(body: MpesaDeposit, user: AuthUser = Depends(current_use
             out = public(await processing("kora", kref, {"checkout": res, "kora_ref": kref}))
             out["checkoutUrl"] = res["checkout_url"]
             await events.record("mpesa.checkout", True, provider="kora", ref=ref, user_id=user.id, ms=_ms(t0),
-                                detail="push refused, sent to Kora's checkout page")
+                                detail="no prompt from the push, sent to Kora's checkout page")
             return out
         except (kora.KoraError, KeyError) as e:
             log.warning("kora checkout refused for %s: %s", ref, e)
