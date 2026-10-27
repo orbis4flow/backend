@@ -57,8 +57,8 @@ def test_tron_address():
 # --------------------------------------------------------------------- kora --
 def test_mpesa_defaults_to_kora():
     from app.config import Settings
-    assert Settings(_env_file=None).mpesa_uses_kora
-    assert not Settings(_env_file=None, mpesa_provider="payhero").mpesa_uses_kora
+    assert not Settings(_env_file=None).mpesa_uses_kora
+    assert Settings(_env_file=None, mpesa_provider="kora").mpesa_uses_kora
 
 
 def test_kora_status_words():
@@ -319,7 +319,8 @@ def test_kora_checkout_reference_maps_back():
 def test_mpesa_ready_falls_back_to_payhero():
     from app.config import Settings
     assert not Settings(_env_file=None).mpesa_ready
-    assert Settings(_env_file=None, kora_secret_key="sk").mpesa_ready
+    assert not Settings(_env_file=None, kora_secret_key="sk").mpesa_ready      # PayHero is the default
+    assert Settings(_env_file=None, mpesa_provider="kora", kora_secret_key="sk").mpesa_ready
     assert Settings(_env_file=None, payhero_api_username="u", payhero_api_password="p", payhero_channel_id=1).mpesa_ready
 
 

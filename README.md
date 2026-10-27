@@ -1,6 +1,6 @@
 # obisflow API
 
-FastAPI service behind the obisflow UI. It handles sign-up and sign-in (through Supabase Auth), profiles, payment methods, referral links, M-Pesa deposits (Kora by default, PayHero as an alternative), card deposits (Paystack), and manual withdrawals. Data lives in Supabase Postgres.
+FastAPI service behind the obisflow UI. It handles sign-up and sign-in (through Supabase Auth), profiles, payment methods, referral links, M-Pesa deposits (PayHero by default, Kora as an alternative), card deposits (Paystack), and manual withdrawals. Data lives in Supabase Postgres.
 
 This folder is its own repository. The UI repository ignores it (`.gitignore`, `.vercelignore`).
 
@@ -36,7 +36,7 @@ Dashboard → Authentication:
 | `DATABASE_URL` | Supabase → **Connect → Session pooler**, with your database password. Not the direct `db.mbazpiignlrayzbwbxth.supabase.co` string: that host is IPv6 only and Render cannot reach it. |
 | `FRONTEND_URL` | The UI's address, e.g. `https://obisflow.com` |
 | `KORA_SECRET_KEY` | Kora → Settings → API Configuration (`sk_test_…` or `sk_live_…`) |
-| `PAYHERO_API_USERNAME`, `PAYHERO_API_PASSWORD` | PayHero → API Keys (only with `MPESA_PROVIDER=payhero`) |
+| `PAYHERO_API_USERNAME`, `PAYHERO_API_PASSWORD` | PayHero → API Keys (M-Pesa deposits) |
 | `PAYHERO_CHANNEL_ID` | PayHero → Payment Channels: the till or paybill that receives payments |
 | `GROQ_API_KEY` | console.groq.com → API Keys (free). Turns on the Live chat assistant |
 | `PAYSTACK_SECRET_KEY` | Paystack → Settings → API Keys & Webhooks (`sk_test_…` or `sk_live_…`) |
@@ -58,7 +58,7 @@ Everything else has a default in `app/config.py`. Add a variable in Render only 
 | `MIN_DEPOSIT_USD` / `MAX_DEPOSIT_USD` | `5` / `10000` |
 | `MIN_WITHDRAW_USD` / `WITHDRAW_FEE_USD` | `5` / `1` |
 | `CARD_FEE_PCT` | `1.5` |
-| `MPESA_PROVIDER` | `kora`. Set to `payhero` to send M-Pesa STK pushes through PayHero instead |
+| `MPESA_PROVIDER` | `payhero`. Set to `kora` to try Kora first (Kora must enable API mobile money on the account) |
 | `PAYSTACK_CURRENCY` | `KES` (the currency your Paystack account settles in) |
 | `CORS_ORIGINS` | none. `FRONTEND_URL` is always allowed; add others (a `www.` address, a Vercel preview) comma separated |
 | `SUPABASE_JWT_SECRET` | none. Only for projects still on the legacy JWT secret |
@@ -69,7 +69,7 @@ Kora sends the STK push for M-Pesa deposits. Only the **secret key** is needed, 
 
 Kora signs its webhooks, and the API still re-reads the charge from Kora's `/charges/{reference}` before crediting.
 
-Each M-Pesa deposit tries, in order, until one is accepted:
+With `MPESA_PROVIDER=kora`, each M-Pesa deposit tries, in order, until one is accepted:
 
 1. **Kora push**: an STK prompt straight to the phone (`/charges/mobile-money`).
 2. **Kora checkout**: if Kora refuses the push, Kora's hosted page limited to mobile money (`/charges/initialize`, reference `DP-…-KC`). The user pays there and returns to `/cashier?deposit=DP-…`, which confirms it.
@@ -77,7 +77,7 @@ Each M-Pesa deposit tries, in order, until one is accepted:
 
 What each step answered is kept in the transaction's `failure_reason` when all three fail, and in the logs.
 
-### PayHero (alternative, `MPESA_PROVIDER=payhero`)
+### PayHero (the default, `MPESA_PROVIDER=payhero`)
 
 PayHero is used for deposits only: an STK push to the user's phone. Nothing to set for callbacks: every push carries its own callback URL with the secret token.
 

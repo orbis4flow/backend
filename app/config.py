@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     demo_balance_usd: float = 10000.0
 
     # ---------------------------------------------------------- M-Pesa ---
-    mpesa_provider: str = "kora"                  # "kora": Kora push → Kora checkout → PayHero; "payhero": PayHero only
+    mpesa_provider: str = "payhero"               # "payhero": PayHero only; "kora": Kora push → Kora checkout → PayHero
 
     # ------------------------------------------------------------ kora ---
     kora_base_url: str = "https://api.korapay.com/merchant/api/v1"

@@ -23,7 +23,7 @@ services:
       # Kora → Settings → API Configuration: the secret key (M-Pesa deposits)
       - key: KORA_SECRET_KEY
         sync: false
-      # PayHero → API Keys, and the payment channel id (only if MPESA_PROVIDER=payhero)
+      # PayHero → API Keys, and the payment channel id: M-Pesa deposits (MPESA_PROVIDER=payhero, the default)
       - key: PAYHERO_API_USERNAME
         sync: false
       - key: PAYHERO_API_PASSWORD
