@@ -109,7 +109,7 @@ Supabase's own emails (sign-up confirmation, password reset) come from Supabase.
 
 ## 7 · Market news and the economic calendar
 
-- News and live forex, metals and index prices: `FINNHUB_API_KEY`, a free key from finnhub.io (60 calls a minute; news is cached for five minutes). Without it those markets are demo-only.
+- News: `FINNHUB_API_KEY`, a free key from finnhub.io (60 calls a minute; news is cached for five minutes).
 - Calendar: the ForexFactory weekly feed, no key. Cached for an hour. It carries forecast and previous figures but no actuals.
 
 ## 8 · Automatic USDT deposits
@@ -203,7 +203,8 @@ All JSON. Signed-in routes take `Authorization: Bearer <access_token>`. Errors a
 | GET | `/health` | database and provider readiness |
 | GET, POST | `/admin/*` | the admin site's API (github.com/Deon62/adminobis); exists only with `ADMIN_TOKEN` set, needs `sql/009_admin.sql`, and `sql/010_events.sql` for its Logs page |
 | GET | `/prices` | the last price per market: `{sym: {p, t, live, dp, payout}}` |
-| GET | `/prices/history?symbol=&seconds=` | up to an hour of prices, one a second, for the chart |
+| GET | `/prices/history?symbol=&seconds=` | up to an hour of ticks, for the chart |
+| GET | `/prices/stream?symbol=` | every tick of one market, as server-sent events |
 | GET | `/status` | daily uptime per service for the status page (checked every five minutes; needs `sql/007_status.sql`) |
 
 `/docs` (the interactive API explorer) is on only when `ENV=development`.
@@ -225,28 +226,20 @@ To receive Kora or PayHero callbacks on your machine, expose port 8000 with a tu
 
 Real and demo. Placing takes the stake in the same transaction that opens the contract, and settling pays back stake plus payout on a win.
 
-Prices are the server's (`app/services/prices.py`), never the browser's: the entry is the feed's last price when the contract is placed, the exit the last price at or before expiry, and the payout is the market's own. Unchanged price loses.
+Prices are obisflow's own, generated on the server (`app/services/prices.py`), never the browser's: the entry is the feed's last price when the contract is placed, the exit the last price at or before expiry, and the payout is the market's own. Unchanged price loses.
 
-| Markets | Source | Key |
-|---|---|---|
-| 11 coins (BTC, ETH, SOL, XRP, BNB, ADA, DOGE, LTC, DOT, LINK, POL as MATIC/USD, XLM) | Binance public market-data stream | none |
-| Forex, gold, silver, WTI, US 500, US 100, UK 100, GER 40 | OANDA prices over Finnhub's websocket | `FINNHUB_API_KEY` |
-| Volatility 75, Volatility 25, Boom 500 | generated on the server, one series for everyone | none |
-| USD/KES, XMR/USD | none: demo-only, on the client's chart | |
-
-- **Real money** is only staked on a market with a price under 15 seconds old (`GET /prices` says which are `live`); otherwise `/trades` answers 409 "closed for real money". Forex is closed at weekends. Real contracts run at least 5 seconds.
-- **A feed that drops** while a contract is open cannot vouch for its exit, so the contract is refunded (`status: void`). A redeploy restarts the feed, so contracts open across a deploy are refunded.
+- **Simulated, and said so.** Every market (forex, crypto, metals, oil, indices, synthetics) is a random walk drawn twice a second from the operating system's random source, the same series for everyone, with calm and busy spells, short trends, and a very weak pull back to the market's base price. It never looks at open positions. They are not quotes from the real markets the symbols are named after: the chart says "obisflow prices" and the Terms (section 05) spell it out. Keep it that way.
+- **Clean candles.** The chart loads 15 minutes of history (`/prices/history`), then takes every tick from `/prices/stream` (server-sent events), and draws 5-second candles.
+- **Restarts** carry on from the last saved price (`sql/011_market_prices.sql`), with 15 minutes of history drawn to match. A contract open across a restart cannot be priced, so it is refunded (`status: void`).
 - **One instance only.** The ticks live in the process's memory, so keep the Render service at one instance.
-- **Demo** contracts on a market with no feed still run on the client's chart; nobody can withdraw demo money.
-- A contract nobody settles (the tab was closed) is settled by the server 30 seconds after expiry: on the feed, or for a client-chart demo contract, at even odds.
+- Real contracts run at least 5 seconds. A contract nobody settles (the tab was closed) is settled by the server 30 seconds after expiry, on the feed.
 
-Needs `sql/008_real_trading.sql` (adds `price_source` and the `void` status).
+Needs `sql/008_real_trading.sql` (adds `price_source` and the `void` status) and `sql/011_market_prices.sql`.
 
 ## Next
 
 In the order they unblock the most:
 
-1. **A paid forex feed** if Finnhub's free websocket proves too thin for some pairs (OANDA's own streaming API, or Twelve Data), and a price source for USD/KES.
-2. **Identity verification.** The verification page runs locally. Smile ID (built for African IDs, including Kenyan national ID and KRA PIN) or Sumsub, with their webhook setting a verified flag that withdrawals check.
-3. **Automated payouts.** Withdrawals are manual. Paystack Transfers can pay Kenyan bank accounts and M-Pesa from the Paystack balance you already hold.
+1. **Identity verification.** The verification page runs locally. Smile ID (built for African IDs, including Kenyan national ID and KRA PIN) or Sumsub, with their webhook setting a verified flag that withdrawals check.
+2. **Automated payouts.** Withdrawals are manual. Paystack Transfers can pay Kenyan bank accounts and M-Pesa from the Paystack balance you already hold.
 4. **Automated withdrawal status** beyond the admin site: today someone pays each withdrawal by hand, then marks it paid there (the user is emailed).

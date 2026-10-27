@@ -1,35 +1,46 @@
-"""Live prices, held on the server so trades settle on prices the client cannot choose.
+"""obisflow's own price feed. Every market is generated here, twice a second,
+the same series for everyone; contracts are placed and settled on it, so the
+client can never choose a price.
 
-  crypto       Binance's public market-data stream (no key): a price a second per coin
-  forex, gold, OANDA prices over Finnhub's websocket (the free key in FINNHUB_API_KEY).
-  oil, indices A market that sends nothing (closed, or not on the free plan) is simply
-               not live, and real money cannot be staked on it
-  synthetics   generated here, a tick a second, the same series for everyone
+These are simulated prices, not quotes from the real markets the symbols are
+named after, and the site and the Terms say so. The generator draws from the
+operating system's random source and never looks at open positions, so it
+cannot lean against anyone's contract.
 
-Each market keeps its ticks for a little over an hour (the longest contract),
-so a contract settles on the last price at or before its expiry. A feed that
-drops and reconnects marks its markets as alive only from then on: a contract
-that was open across the gap cannot be priced and is refunded instead.
+Each tick is a step of a random walk with three slow-moving parts, which is
+what makes the candles look like a market rather than noise:
+  regime   volatility drifts between calm and busy spells
+  drift    a small trend that wanders, so moves run for a while, then fade
+  anchor   a very weak pull back to the market's base price, so a series
+           cannot wander off over days and weeks
+Boom 500 also jumps up now and then.
+
+Ticks are kept for a little over an hour (the longest contract), so a contract
+settles on the last price at or before its expiry. The last price of each
+market is saved every few seconds (sql/011_market_prices.sql), so a restart
+carries on from there; a contract open across a restart cannot be priced and
+is refunded.
 
 One process holds the feed, so the API runs as a single instance.
 """
 import asyncio
-import json
 import logging
+import math
 import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-import websockets
-
-from ..config import get_settings
+from .. import db
 
 log = logging.getLogger("obisflow.prices")
 
+TICK_S = 0.5           # a new price for every market this often
 KEEP_S = 3700          # ticks kept per market: the longest contract plus a margin
-FRESH_S = 15           # a price older than this is not one to open a contract at
+FRESH_S = 5            # a price older than this means the generator has stopped
+BACKFILL_S = 900       # history drawn on start, so the chart is never empty
+SAVE_EVERY_S = 5
 
 
 @dataclass(frozen=True)
@@ -37,58 +48,57 @@ class Market:
     sym: str
     payout: int                 # % of the stake paid on top when the contract wins
     dp: int                     # decimal places, as the chart shows them
-    source: str                 # 'binance', 'finnhub', 'synthetic'
-    feed: str = ""              # the symbol at the source
-    base: float = 0.0           # synthetics: where the series starts
-    vol: float = 0.0            # synthetics: typical move per second
-    spikes: bool = False        # synthetics: Boom-style upward jumps
+    base: float                 # where the series starts, and the level it is anchored to
+    vol: float                  # typical move per five-second candle
+    spikes: bool = False        # Boom-style upward jumps
 
 
 MARKETS: dict[str, Market] = {m.sym: m for m in [
-    Market("EUR/USD", 88, 5, "finnhub", "OANDA:EUR_USD"),
-    Market("GBP/USD", 87, 5, "finnhub", "OANDA:GBP_USD"),
-    Market("USD/JPY", 86, 3, "finnhub", "OANDA:USD_JPY"),
-    Market("AUD/USD", 86, 5, "finnhub", "OANDA:AUD_USD"),
-    Market("USD/CHF", 86, 5, "finnhub", "OANDA:USD_CHF"),
-    Market("USD/CAD", 86, 5, "finnhub", "OANDA:USD_CAD"),
-    Market("NZD/USD", 85, 5, "finnhub", "OANDA:NZD_USD"),
-    Market("EUR/GBP", 85, 5, "finnhub", "OANDA:EUR_GBP"),
-    Market("EUR/JPY", 85, 3, "finnhub", "OANDA:EUR_JPY"),
-    Market("GBP/JPY", 84, 3, "finnhub", "OANDA:GBP_JPY"),
-    Market("AUD/JPY", 84, 3, "finnhub", "OANDA:AUD_JPY"),
-    Market("EUR/CHF", 84, 5, "finnhub", "OANDA:EUR_CHF"),
-    Market("USD/ZAR", 80, 4, "finnhub", "OANDA:USD_ZAR"),
-    Market("USD/MXN", 80, 4, "finnhub", "OANDA:USD_MXN"),
-    Market("BTC/USD", 84, 2, "binance", "BTCUSDT"),
-    Market("ETH/USD", 83, 2, "binance", "ETHUSDT"),
-    Market("SOL/USD", 82, 2, "binance", "SOLUSDT"),
-    Market("XRP/USD", 80, 4, "binance", "XRPUSDT"),
-    Market("BNB/USD", 81, 2, "binance", "BNBUSDT"),
-    Market("ADA/USD", 79, 4, "binance", "ADAUSDT"),
-    Market("DOGE/USD", 78, 5, "binance", "DOGEUSDT"),
-    Market("LTC/USD", 80, 3, "binance", "LTCUSDT"),
-    Market("DOT/USD", 79, 4, "binance", "DOTUSDT"),
-    Market("LINK/USD", 80, 3, "binance", "LINKUSDT"),
-    Market("MATIC/USD", 78, 4, "binance", "POLUSDT"),     # Polygon's token is POL now
-    Market("XLM/USD", 77, 5, "binance", "XLMUSDT"),
-    Market("XAU/USD", 85, 2, "finnhub", "OANDA:XAU_USD"),
-    Market("XAG/USD", 82, 3, "finnhub", "OANDA:XAG_USD"),
-    Market("WTI", 81, 3, "finnhub", "OANDA:WTICO_USD"),
-    Market("US 500", 86, 2, "finnhub", "OANDA:SPX500_USD"),
-    Market("US 100", 85, 2, "finnhub", "OANDA:NAS100_USD"),
-    Market("UK 100", 84, 2, "finnhub", "OANDA:UK100_GBP"),
-    Market("GER 40", 84, 2, "finnhub", "OANDA:DE30_EUR"),
-    Market("Volatility 75", 92, 1, "synthetic", base=412880, vol=420),
-    Market("Volatility 25", 90, 2, "synthetic", base=2684.3, vol=3.1),
-    Market("Boom 500", 89, 2, "synthetic", base=9142.8, vol=8, spikes=True),
+    Market("EUR/USD", 88, 5, 1.0842, 0.0016),
+    Market("GBP/USD", 87, 5, 1.2714, 0.0019),
+    Market("USD/JPY", 86, 3, 151.38, 0.18),
+    Market("AUD/USD", 86, 5, 0.6628, 0.0014),
+    Market("USD/CHF", 86, 5, 0.9042, 0.0012),
+    Market("USD/CAD", 86, 5, 1.3684, 0.0015),
+    Market("NZD/USD", 85, 5, 0.6124, 0.0013),
+    Market("EUR/GBP", 85, 5, 0.8528, 0.0009),
+    Market("EUR/JPY", 85, 3, 164.12, 0.21),
+    Market("GBP/JPY", 84, 3, 192.46, 0.28),
+    Market("AUD/JPY", 84, 3, 100.34, 0.16),
+    Market("EUR/CHF", 84, 5, 0.9804, 0.0008),
+    Market("USD/ZAR", 80, 4, 18.412, 0.06),
+    Market("USD/KES", 79, 3, 129.24, 0.24),
+    Market("USD/MXN", 80, 4, 16.842, 0.05),
+    Market("BTC/USD", 84, 2, 67240, 120),
+    Market("ETH/USD", 83, 2, 3412.6, 9),
+    Market("SOL/USD", 82, 2, 168.42, 1.4),
+    Market("XRP/USD", 80, 4, 0.5284, 0.012),
+    Market("BNB/USD", 81, 2, 592.4, 7),
+    Market("ADA/USD", 79, 4, 0.4612, 0.011),
+    Market("DOGE/USD", 78, 5, 0.1582, 0.006),
+    Market("LTC/USD", 80, 3, 84.26, 1.2),
+    Market("DOT/USD", 79, 4, 6.842, 0.14),
+    Market("LINK/USD", 80, 3, 17.284, 0.32),
+    Market("MATIC/USD", 78, 4, 0.7142, 0.015),
+    Market("XLM/USD", 77, 5, 0.1124, 0.004),
+    Market("XMR/USD", 78, 2, 162.84, 2.1),
+    Market("XAU/USD", 85, 2, 2318.4, 3.4),
+    Market("XAG/USD", 82, 3, 27.412, 0.06),
+    Market("WTI", 81, 3, 78.93, 0.12),
+    Market("US 500", 86, 2, 5308.2, 5.2),
+    Market("US 100", 85, 2, 18642, 22),
+    Market("UK 100", 84, 2, 8214.6, 7),
+    Market("GER 40", 84, 2, 18492, 19),
+    Market("Volatility 75", 92, 1, 412880, 420),
+    Market("Volatility 25", 90, 2, 2684.3, 3.1),
+    Market("Boom 500", 89, 2, 9142.8, 8, spikes=True),
 ]}
-# USD/KES and XMR/USD have no free live source: they stay demo-only on the client's chart
 
 
 @dataclass
 class Series:
     ticks: deque = field(default_factory=deque)     # (epoch seconds, Decimal)
-    alive_since: float | None = None                # when the feed for it last (re)connected
+    alive_since: float | None = None                # when the generator (re)started
 
     def add(self, t: float, p: Decimal) -> None:
         if self.ticks and t < self.ticks[-1][0]:
@@ -100,13 +110,7 @@ class Series:
 
 
 _series: dict[str, Series] = {sym: Series() for sym in MARKETS}
-
-
-def _alive(source: str, on: bool) -> None:
-    now = time.time()
-    for m in MARKETS.values():
-        if m.source == source:
-            _series[m.sym].alive_since = now if on else None
+_tick = asyncio.Event()                             # set on every tick, for the live stream
 
 
 def _record(sym: str, t: float, p) -> None:
@@ -124,7 +128,7 @@ def market(sym: str) -> Market | None:
 
 
 def latest(sym: str) -> tuple[float, Decimal] | None:
-    """The last price, if its feed is up and it is recent enough to trade at."""
+    """The last price, if the generator is running and it is recent enough to trade at."""
     s = _series.get(sym)
     if not s or s.alive_since is None or not s.ticks:
         return None
@@ -133,8 +137,8 @@ def latest(sym: str) -> tuple[float, Decimal] | None:
 
 
 def at(sym: str, when: float, opened: float) -> Decimal | None:
-    """The price at `when`: the last tick at or before it. None unless the feed
-    was up the whole time from `opened`, and `when` has passed."""
+    """The price at `when`: the last tick at or before it. None unless the
+    generator ran the whole time from `opened`, and `when` has passed."""
     s = _series.get(sym)
     if not s or s.alive_since is None or s.alive_since > opened or time.time() < when:
         return None
@@ -159,104 +163,101 @@ def snapshot() -> dict:
 
 
 def history(sym: str, seconds: int) -> list[list]:
-    """Up to `seconds` of ticks, one a second (the last in each second)."""
+    """Up to `seconds` of ticks, oldest first, as [epoch seconds, price]."""
     s = _series.get(sym)
     if not s or s.alive_since is None:
         return []
     since = time.time() - seconds
-    out: list[list] = []
-    for t, p in s.ticks:
-        if t < since:
-            continue
-        sec = int(t)
-        if out and out[-1][0] == sec:
-            out[-1][1] = format(p.normalize(), "f")
-        else:
-            out.append([sec, format(p.normalize(), "f")])
-    return out
+    return [[round(t, 2), format(p.normalize(), "f")] for t, p in s.ticks if t >= since]
 
 
-# ------------------------------------------------------------------ feeds --
-async def _event(source: str, ok: bool, detail: str) -> None:
-    from . import events
-    await events.record(f"feed.{source}", ok, provider=source, detail=detail[:300])
+async def next_tick() -> None:
+    """Wait for the next tick (for the live stream)."""
+    await _tick.wait()
 
 
-async def _binance(stop: asyncio.Event) -> None:
-    by_feed = {m.feed.lower(): m.sym for m in MARKETS.values() if m.source == "binance"}
-    url = "wss://data-stream.binance.vision/stream?streams=" + "/".join(f"{f}@miniTicker" for f in by_feed)
-    backoff = 1
-    while not stop.is_set():
-        try:
-            async with websockets.connect(url, ping_interval=20, open_timeout=15) as ws:
-                _alive("binance", True)
-                await _event("binance", True, "connected")
-                backoff = 1
-                async for raw in ws:
-                    d = json.loads(raw).get("data") or {}
-                    sym = by_feed.get((d.get("s") or "").lower())
-                    if sym and d.get("c"):
-                        _record(sym, (d.get("E") or time.time() * 1000) / 1000, d["c"])
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            log.warning("binance feed dropped: %s", e)
-            await _event("binance", False, f"dropped: {e}")
-        _alive("binance", False)
-        await asyncio.sleep(backoff)
-        backoff = min(backoff * 2, 30)
+# --------------------------------------------------------------- generator --
+@dataclass
+class _Walk:
+    p: float
+    regime: float = 0.0          # log of the volatility multiplier
+    drift: float = 0.0           # per second, in units of the market's per-second sigma
 
 
-async def _finnhub(stop: asyncio.Event) -> None:
-    key = get_settings().finnhub_api_key
-    if not key:
-        log.info("no FINNHUB_API_KEY: forex, metals and indices are demo-only")
-        return
-    by_feed = {m.feed: m.sym for m in MARKETS.values() if m.source == "finnhub"}
-    backoff = 1
-    while not stop.is_set():
-        try:
-            async with websockets.connect(f"wss://ws.finnhub.io?token={key}", ping_interval=20,
-                                          open_timeout=15) as ws:
-                for f in by_feed:
-                    await ws.send(json.dumps({"type": "subscribe", "symbol": f}))
-                _alive("finnhub", True)
-                await _event("finnhub", True, "connected")
-                backoff = 1
-                async for raw in ws:
-                    msg = json.loads(raw)
-                    if msg.get("type") != "trade":
-                        continue
-                    for d in msg.get("data") or []:
-                        sym = by_feed.get(d.get("s"))
-                        if sym and d.get("p"):
-                            _record(sym, (d.get("t") or time.time() * 1000) / 1000, d["p"])
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            log.warning("finnhub feed dropped: %s", e)
-            await _event("finnhub", False, f"dropped: {e}")
-        _alive("finnhub", False)
-        await asyncio.sleep(backoff)
-        backoff = min(backoff * 4, 120)       # the free plan limits reconnects
+SIGMA_PER_VOL = 0.28            # per-second sigma, as a share of the market's per-candle vol
+ANCHOR_HALF_LIFE_S = 6 * 3600   # how slowly a series is pulled back to its base
 
 
-async def _synthetic(stop: asyncio.Event) -> None:
-    rng = random.SystemRandom()
-    level = {m.sym: m.base for m in MARKETS.values() if m.source == "synthetic"}
-    _alive("synthetic", True)
-    while not stop.is_set():
-        now = time.time()
-        for sym, p in level.items():
-            m = MARKETS[sym]
-            step = rng.gauss(0, m.vol)
-            if m.spikes and rng.random() < 1 / 500:           # about one spike in 500 ticks
-                step = abs(step) + m.vol * 25
-            p = max(p * 0.2, p + step)
-            level[sym] = p
-            _record(sym, now, round(p, m.dp))
-        await asyncio.sleep(1)
+def _step(m: Market, w: _Walk, rng: random.Random, dt: float) -> float:
+    sigma = m.vol * SIGMA_PER_VOL
+    # calm and busy spells: the multiplier wanders slowly between about 0.7 and 1.5,
+    # so candles keep a steady size from one minute to the next
+    w.regime += -0.003 * w.regime * dt + rng.gauss(0, 0.015) * math.sqrt(dt)
+    w.regime = max(-0.35, min(0.4, w.regime))
+    # a gentle wandering trend: moves lean one way for a minute or two, then fade
+    w.drift += -0.01 * w.drift * dt + rng.gauss(0, 0.005) * math.sqrt(dt)
+    w.drift = max(-0.15, min(0.15, w.drift))
+    anchor = (m.base - w.p) * (math.log(2) / ANCHOR_HALF_LIFE_S) * dt
+    move = sigma * math.exp(w.regime) * (w.drift * dt + rng.gauss(0, 1) * math.sqrt(dt))
+    if m.spikes and rng.random() < dt / 500:        # about one spike every eight minutes
+        move += sigma * rng.uniform(15, 40)
+    return max(m.base * 0.2, w.p + move + anchor)
+
+
+async def _load_levels() -> dict[str, float]:
+    try:
+        # a slow database must not hold the prices up: past five seconds, start from the bases
+        rows = await asyncio.wait_for(db.many("select sym, price from app.market_prices"), timeout=5)
+        return {r["sym"]: float(r["price"]) for r in rows if r["sym"] in MARKETS}
+    except Exception as e:
+        log.info("starting every market at its base price (%s)", e)
+        return {}
+
+
+async def _save_levels(walks: dict[str, _Walk]) -> None:
+    try:
+        async with db.tx() as conn:
+            for sym, w in walks.items():
+                await conn.execute(
+                    """insert into app.market_prices (sym, price, updated_at) values (%s, %s, now())
+                       on conflict (sym) do update set price = excluded.price, updated_at = now()""",
+                    (sym, round(w.p, MARKETS[sym].dp)))
+    except Exception as e:
+        log.debug("market prices not saved: %s", e)
+
+
+def _backfill(m: Market, end: float, now: float, rng: random.Random) -> None:
+    """Draw BACKFILL_S of history that ends exactly where the series carries on."""
+    walk = _Walk(end)
+    path = [end]
+    for _ in range(int(BACKFILL_S / TICK_S)):
+        walk.p = _step(m, walk, rng, TICK_S)
+        path.append(walk.p)
+    path.reverse()                                   # the walk run backwards ends at `end`
+    start = now - TICK_S * (len(path) - 1)
+    for i, p in enumerate(path):
+        _record(m.sym, start + i * TICK_S, round(p, m.dp))
 
 
 async def watch(stop: asyncio.Event) -> None:
-    await asyncio.gather(_binance(stop), _finnhub(stop), _synthetic(stop))
+    global _tick
+    rng = random.SystemRandom()
+    levels = await _load_levels()
+    now = time.time()
+    walks = {sym: _Walk(levels.get(sym, m.base)) for sym, m in MARKETS.items()}
+    for sym, m in MARKETS.items():
+        _backfill(m, walks[sym].p, now, rng)
+        _series[sym].alive_since = now               # contracts from before a restart are refunded
+    saved = time.monotonic()
+    while not stop.is_set():
+        now = time.time()
+        for sym, m in MARKETS.items():
+            w = walks[sym]
+            w.p = _step(m, w, rng, TICK_S)
+            _record(sym, now, round(w.p, m.dp))
+        _tick.set()
+        _tick = asyncio.Event()
+        if time.monotonic() - saved >= SAVE_EVERY_S:
+            saved = time.monotonic()
+            asyncio.get_running_loop().create_task(_save_levels(walks))
+        await asyncio.sleep(TICK_S)

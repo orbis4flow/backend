@@ -372,10 +372,10 @@ def test_real_trades_refused_without_a_live_price():
         prof.for_user = ensure
         r = client.post("/trades", json={"account": "real", "symbol": "USD/KES", "direction": "Rise", "stake": 5,
                                          "payout_pct": 100, "duration_s": 6, "entry_price": "1"})
-        assert r.status_code == 409 and "demo-only" in r.json()["detail"]
-        r = client.post("/trades", json={"account": "real", "symbol": "EUR/USD", "direction": "Rise", "stake": 5,
+        assert r.status_code == 409 and "paused" in r.json()["detail"]
+        r = client.post("/trades", json={"account": "demo", "symbol": "NOT/REAL", "direction": "Rise", "stake": 5,
                                          "payout_pct": 100, "duration_s": 6, "entry_price": "1"})
-        assert r.status_code == 409 and "closed for real money" in r.json()["detail"]
+        assert r.status_code == 400 and "not offered" in r.json()["detail"]
     finally:
         prof.for_user = orig
         the_app.dependency_overrides.clear()
@@ -419,3 +419,28 @@ def test_admin_logs_need_the_token(monkeypatch):
     assert client.get("/admin/logs").status_code == 401
     assert client.get("/admin/logs/summary").status_code == 401
     admin_router._misses.clear()
+
+
+def test_generated_prices_stay_sane():
+    import random
+    from app.services import prices
+    rng = random.Random(7)
+    for m in prices.MARKETS.values():
+        w = prices._Walk(m.base)
+        for _ in range(20000):                       # about three hours of ticks
+            w.p = prices._step(m, w, rng, prices.TICK_S)
+        assert m.base * 0.2 <= w.p <= m.base * 5, m.sym
+
+
+def test_backfilled_history_is_a_walk_that_ends_at_the_current_price():
+    import random, statistics, time
+    from app.services import prices
+    m = prices.MARKETS["EUR/USD"]
+    prices._series[m.sym].ticks.clear()
+    prices._backfill(m, 1.1, time.time(), random.Random(5))
+    ps = [float(p) for _, p in prices._series[m.sym].ticks]
+    assert ps[-1] == 1.1
+    steps = [b - a for a, b in zip(ps, ps[1:])]
+    # a walk wanders far more than one step's size; noise around one level does not
+    assert max(ps) - min(ps) > 10 * statistics.pstdev(steps)
+    prices._series[m.sym].ticks.clear()

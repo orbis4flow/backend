@@ -5,12 +5,11 @@ placing takes the stake, settling pays back what the contract returned,
 selling back pays 75% of the stake. A trade settles once; asking again
 answers with the same result.
 
-Prices come from the server's own feed (services/prices.py): the entry is
-the last price when the contract is placed, the exit the last price at or
-before expiry, and the payout is the market's, never the client's. A
-contract the feed cannot price (it dropped while the contract was open) is
-refunded. Real money is only staked on a market whose feed is live. Demo
-contracts on a market with no feed still run on the client's chart.
+Prices come from the server's own generated feed (services/prices.py): the
+entry is the last price when the contract is placed, the exit the last price
+at or before expiry, and the payout is the market's, never the client's. A
+contract the feed cannot price (the API restarted while it was open) is
+refunded.
 """
 import asyncio
 import secrets
@@ -177,10 +176,10 @@ async def place(body: Place, user: AuthUser = Depends(current_user)):
     live = prices.latest(m.sym) if m else None
     if live:
         entry, payout, source = live[1], Decimal(m.payout), "server"
+    elif not m:
+        raise HTTPException(status_code=400, detail="That market is not offered.")
     elif body.account == "real":
-        raise HTTPException(status_code=409, detail=(
-            f"{body.symbol.strip()} is closed for real money right now. Pick another market, or switch to Demo."
-            if m else "That market is demo-only."))
+        raise HTTPException(status_code=409, detail=f"Prices for {m.sym} are paused for a moment. Try again shortly.")
     else:
         entry, payout, source = _price(body.entry_price), Decimal(str(body.payout_pct)), "client"
     if body.account == "real" and body.duration_s < MIN_REAL_S:

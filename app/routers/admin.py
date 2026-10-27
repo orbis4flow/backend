@@ -380,7 +380,7 @@ async def system(_: str = Depends(admin)):
     s = get_settings()
     snap = prices.snapshot()
     now = time.time()
-    markets = [{"sym": m.sym, "source": m.source, "payout": m.payout,
+    markets = [{"sym": m.sym, "source": "obisflow", "payout": m.payout,
                 "price": snap[m.sym]["p"] if m.sym in snap else None,
                 "age": round(now - snap[m.sym]["t"], 1) if m.sym in snap else None,
                 "live": bool(snap.get(m.sym, {}).get("live"))} for m in prices.MARKETS.values()]
@@ -394,7 +394,7 @@ async def system(_: str = Depends(admin)):
             "Paystack (card)": bool(s.paystack_secret_key),
             "Resend (email)": bool(s.resend_api_key),
             "Africa's Talking (SMS)": bool(s.at_username and s.at_api_key),
-            "Finnhub (forex prices, news)": bool(s.finnhub_api_key),
+            "Finnhub (market news)": bool(s.finnhub_api_key),
         },
         "markets": markets,
     }
