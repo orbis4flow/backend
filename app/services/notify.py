@@ -186,6 +186,33 @@ async def withdrawal_requested(tx: dict) -> None:
         f"obisflow: withdrawal of {local} requested. Ref {tx['reference']}. Not you? Contact support now.")
 
 
+async def withdrawal_paid(tx: dict) -> None:
+    p = await _person(tx["user_id"])
+    if not p:
+        return
+    local = f"KSh {int(tx['local_amount']):,}" if tx.get("local_amount") else _money(tx["amount_usd"])
+    rows = [("Amount", local), ("Reference", tx["reference"])]
+    if tx.get("provider_receipt"):
+        rows.append(("Receipt", tx["provider_receipt"]))
+    email(p["id"], "withdrawal_paid", p["email"], f"Withdrawal paid: {_money(tx['amount_usd'])}",
+          "Your withdrawal has been paid",
+          [f"{local} has been sent to {html.escape(tx.get('destination') or 'your account')}."], rows)
+    sms(p["id"], "withdrawal_paid", p["phone"],
+        f"obisflow: withdrawal of {local} paid. Ref {tx['reference']}.")
+
+
+async def withdrawal_rejected(tx: dict) -> None:
+    p = await _person(tx["user_id"])
+    if not p:
+        return
+    s = get_settings()
+    email(p["id"], "withdrawal_rejected", p["email"], "Your withdrawal was not paid",
+          "Your withdrawal was not paid",
+          [f"We could not pay your withdrawal of {_money(tx['amount_usd'])}: {html.escape(tx.get('failure_reason') or '')}",
+           f"The full {_money(tx['net_usd'])} is back in your real account. Reply to this email if you have questions."],
+          [("Reference", tx["reference"])], ("View cashier", f"{s.frontend_url}/cashier"))
+
+
 async def method_added(user_id, label: str, masked: str) -> None:
     p = await _person(user_id)
     if not p:

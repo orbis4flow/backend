@@ -379,3 +379,23 @@ def test_real_trades_refused_without_a_live_price():
     finally:
         prof.for_user = orig
         the_app.dependency_overrides.clear()
+
+
+# ------------------------------------------------------------------- admin --
+def test_admin_api_is_off_without_a_token(monkeypatch):
+    from app.config import get_settings
+    monkeypatch.setattr(get_settings(), "admin_token", "")
+    assert client.get("/admin/overview", headers={"Authorization": "Bearer anything"}).status_code == 404
+
+
+def test_admin_api_refuses_wrong_tokens_then_locks_out(monkeypatch):
+    from app.config import get_settings
+    from app.routers import admin as admin_router
+    monkeypatch.setattr(get_settings(), "admin_token", "x" * 40)
+    admin_router._misses.clear()
+    assert client.get("/admin/overview").status_code == 401
+    assert client.get("/admin/overview", headers={"Authorization": "Bearer " + "y" * 40}).status_code == 401
+    for _ in range(8):
+        client.get("/admin/overview")
+    assert client.get("/admin/overview", headers={"Authorization": "Bearer " + "x" * 40}).status_code == 429
+    admin_router._misses.clear()

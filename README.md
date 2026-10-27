@@ -137,7 +137,7 @@ Counted hourly, per referrer per week (Monday to Sunday, Nairobi time): their re
 
 ## 11 · Withdrawals are manual
 
-A withdrawal takes the amount plus the fee from the balance at once and waits in review. Pay it yourself (M-Pesa, bank or USDT), then record it with `sql/admin/withdrawals.sql`: approve with your receipt, or reject, which refunds the whole amount. For M-Pesa, `local_amount` is the KSh to send.
+A withdrawal takes the amount plus the fee from the balance at once and waits in review. Pay it yourself (M-Pesa, bank or USDT), then mark it paid on the admin site with your receipt, or reject it there, which refunds the whole amount and emails the user (or use `sql/admin/withdrawals.sql`). For M-Pesa, `local_amount` is the KSh to send.
 
 ## Money rules
 
@@ -201,6 +201,7 @@ All JSON. Signed-in routes take `Authorization: Bearer <access_token>`. Errors a
 | POST | `/sessions/revoke-others` | sign every other device out |
 | POST | `/webhooks/kora`, `/webhooks/payhero`, `/webhooks/paystack` | provider callbacks |
 | GET | `/health` | database and provider readiness |
+| GET, POST | `/admin/*` | the admin site's API (`admin/` in the website repo); exists only with `ADMIN_TOKEN` set, needs `sql/009_admin.sql` |
 | GET | `/prices` | the last price per market: `{sym: {p, t, live, dp, payout}}` |
 | GET | `/prices/history?symbol=&seconds=` | up to an hour of prices, one a second, for the chart |
 | GET | `/status` | daily uptime per service for the status page (checked every five minutes; needs `sql/007_status.sql`) |
@@ -248,4 +249,4 @@ In the order they unblock the most:
 1. **A paid forex feed** if Finnhub's free websocket proves too thin for some pairs (OANDA's own streaming API, or Twelve Data), and a price source for USD/KES.
 2. **Identity verification.** The verification page runs locally. Smile ID (built for African IDs, including Kenyan national ID and KRA PIN) or Sumsub, with their webhook setting a verified flag that withdrawals check.
 3. **Automated payouts.** Withdrawals are manual. Paystack Transfers can pay Kenyan bank accounts and M-Pesa from the Paystack balance you already hold.
-4. **Withdrawal status emails.** Approving or rejecting a withdrawal is an SQL query today, so it sends nothing; a small admin endpoint for it could email the user.
+4. **Automated withdrawal status** beyond the admin site: today someone pays each withdrawal by hand, then marks it paid there (the user is emailed).

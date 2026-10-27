@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     frontend_url: str = "https://obisflow.com"   # links in emails, referral links, returns
     public_api_url: str = ""                      # this API's own URL; Render sets RENDER_EXTERNAL_URL
     cors_origins: str = ""                        # extra origins, comma separated (FRONTEND_URL is always allowed)
+    # the admin API exists only with ADMIN_TOKEN set (32+ characters); ADMIN_URL is the admin site, always allowed
+    admin_token: str = ""
+    admin_url: str = ""
 
     # -------------------------------------------------------- supabase ---
     supabase_url: str = "https://mbazpiignlrayzbwbxth.supabase.co"
@@ -87,8 +90,9 @@ class Settings(BaseSettings):
     @property
     def cors_list(self) -> list[str]:
         items = [o.strip().rstrip("/") for o in self.cors_origins.split(",") if o.strip()]
-        if self.frontend_url and self.frontend_url not in items:
-            items.append(self.frontend_url)
+        for extra in (self.frontend_url, self.admin_url.rstrip("/")):
+            if extra and extra not in items:
+                items.append(extra)
         return items
 
     @property
