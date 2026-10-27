@@ -22,10 +22,11 @@ create index if not exists notifications_user_idx on app.notifications (user_id,
 
 -- ---------------------------------------------- transactions: new sources --
 -- USDT deposits are matched on the TRON chain ('tron'); referral payouts
--- land in the real balance as their own kind of transaction.
+-- land in the real balance as their own kind of transaction. 'kora' is
+-- 006's, listed here too so running this again after 006 keeps those rows valid.
 alter table app.transactions drop constraint if exists transactions_provider_check;
 alter table app.transactions add constraint transactions_provider_check
-  check (provider in ('payhero', 'paystack', 'manual', 'tron', 'orbisflow'));
+  check (provider in ('kora', 'payhero', 'paystack', 'manual', 'tron', 'orbisflow'));
 
 alter table app.transactions drop constraint if exists transactions_type_check;
 alter table app.transactions add constraint transactions_type_check
