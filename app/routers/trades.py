@@ -5,11 +5,16 @@ placing takes the stake, settling pays back what the contract returned,
 selling back pays 75% of the stake. A trade settles once; asking again
 answers with the same result.
 
-Demo only. The outcome is decided from the entry and exit prices the
-client's chart saw, which is fine for practice money and not for real
-money: real trading waits for a server-side price feed (README, "Next").
+Prices come from the server's own feed (services/prices.py): the entry is
+the last price when the contract is placed, the exit the last price at or
+before expiry, and the payout is the market's, never the client's. A
+contract the feed cannot price (it dropped while the contract was open) is
+refunded. Real money is only staked on a market whose feed is live. Demo
+contracts on a market with no feed still run on the client's chart.
 """
+import asyncio
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Literal
@@ -21,7 +26,7 @@ from pydantic import BaseModel, Field
 from .. import db
 from ..config import get_settings
 from ..security import AuthUser, current_user
-from ..services import limits, profiles
+from ..services import limits, prices, profiles
 from ..util import code, show_date, usd
 
 router = APIRouter(tags=["trading"])
@@ -30,6 +35,7 @@ SELL_BACK = Decimal("0.75")       # the share of the stake a contract sold back 
 GRACE = timedelta(seconds=30)     # after expiry, an unsettled contract is settled by the server
 EARLY = timedelta(seconds=1.5)    # clock skew allowed when the client settles at expiry
 MIN_STAKE, MAX_STAKE = Decimal("1"), Decimal("10000")
+MIN_REAL_S = 5                    # real contracts run at least this long: the feed ticks about once a second
 
 
 class Place(BaseModel):
@@ -43,7 +49,7 @@ class Place(BaseModel):
 
 
 class Settle(BaseModel):
-    exit_price: str = Field(min_length=1, max_length=32)
+    exit_price: str | None = Field(default=None, max_length=32)   # read only for demo contracts on the client's chart
 
 
 def _price(text: str) -> Decimal:
@@ -70,6 +76,7 @@ def public(t: dict, balance: Decimal | None = None) -> dict:
         "entry": _num(t["entry_price"]), "exit": _num(t["exit_price"]),
         "status": t["status"], "result": t["status"] if t["status"] != "sold" else
                   ("won" if (t["profit"] or 0) >= 0 else "lost"),
+        "priced": t.get("price_source", "client"),
         "returned": float(t["returned"]), "profit": float(t["profit"]) if t["profit"] is not None else None,
         "pl": float(t["profit"] or 0), "account": t["account_kind"],
         "openedAt": t["opened_at"].isoformat(), "expiresAt": t["expires_at"].isoformat(),
@@ -81,24 +88,43 @@ def public(t: dict, balance: Decimal | None = None) -> dict:
     return out
 
 
+def _server_exit(t: dict) -> Decimal | None:
+    """The feed's price at this contract's expiry, if the feed can vouch for it."""
+    return prices.at(t["symbol"], t["expires_at"].timestamp(), t["opened_at"].timestamp())
+
+
 async def _settle(conn, t: dict, *, exit_price: Decimal | None, by: str) -> tuple[dict, Decimal]:
-    """Settle an open trade inside the caller's transaction. With no exit
-    price (the client never came back), the server decides it at even odds."""
-    if exit_price is None:
-        won = secrets.randbelow(2) == 1
-    elif t["direction"] == "Rise":
-        won = exit_price > t["entry_price"]
-    else:
-        won = exit_price < t["entry_price"]
+    """Settle an open trade inside the caller's transaction.
+    Server-priced contracts settle on the feed whatever the client sends, and
+    are refunded when the feed cannot price them. A demo contract on the
+    client's chart that nobody came back to settle is decided at even odds."""
     stake = t["stake"]
-    returned = usd(stake + stake * t["payout_pct"] / 100) if won else Decimal("0.00")
+    if t.get("price_source") == "server":
+        exit_price = _server_exit(t)
+        if exit_price is None:
+            status, by = "void", "void"
+        else:
+            won = exit_price > t["entry_price"] if t["direction"] == "Rise" else exit_price < t["entry_price"]
+            status = "won" if won else "lost"
+    else:
+        if exit_price is None:
+            won = secrets.randbelow(2) == 1
+        elif t["direction"] == "Rise":
+            won = exit_price > t["entry_price"]
+        else:
+            won = exit_price < t["entry_price"]
+        status = "won" if won else "lost"
+    if status == "void":
+        returned = stake
+    else:
+        returned = usd(stake + stake * t["payout_pct"] / 100) if status == "won" else Decimal("0.00")
     cur = await conn.execute(
         """update app.trades
               set status = %s, exit_price = %s, returned = %s, profit = %s,
                   settled_by = %s, settled_at = now()
             where id = %s and status = 'open'
         returning *""",
-        ("won" if won else "lost", exit_price, returned, returned - stake, by, t["id"]))
+        (status, exit_price, returned, returned - stake, by, t["id"]))
     row = await cur.fetchone()
     cur = await conn.execute(
         "update app.accounts set balance = balance + %s where id = %s returning balance",
@@ -140,16 +166,28 @@ async def _mine(conn, ref: str, user_id: str) -> dict:
 # ------------------------------------------------------------------ place --
 @router.post("/trades", status_code=201)
 async def place(body: Place, user: AuthUser = Depends(current_user)):
-    if body.account == "real":
-        raise HTTPException(status_code=403,
-                            detail="Real-money trading is not open yet. Switch to Demo to practise.")
     await profiles.for_user(user)
     stake = usd(body.stake)
     if stake < MIN_STAKE or stake > MAX_STAKE:
         raise HTTPException(status_code=400, detail=f"Stake must be between ${MIN_STAKE} and ${MAX_STAKE:,}.")
-    entry = _price(body.entry_price)
+
+    # the price and the payout are the server's; the client's only count for
+    # a demo contract on a market the feed does not carry
+    m = prices.market(body.symbol)
+    live = prices.latest(m.sym) if m else None
+    if live:
+        entry, payout, source = live[1], Decimal(m.payout), "server"
+    elif body.account == "real":
+        raise HTTPException(status_code=409, detail=(
+            f"{body.symbol.strip()} is closed for real money right now. Pick another market, or switch to Demo."
+            if m else "That market is demo-only."))
+    else:
+        entry, payout, source = _price(body.entry_price), Decimal(str(body.payout_pct)), "client"
+    if body.account == "real" and body.duration_s < MIN_REAL_S:
+        raise HTTPException(status_code=400, detail=f"Real contracts run for at least {MIN_REAL_S} seconds.")
     await limits.can_trade(user.id, body.account, stake)
 
+    opened = time.time()
     async with db.tx() as conn:
         cur = await conn.execute(
             """update app.accounts set balance = balance - %s
@@ -161,18 +199,25 @@ async def place(body: Place, user: AuthUser = Depends(current_user)):
             raise HTTPException(status_code=400, detail="Not enough balance for that stake.")
         cur = await conn.execute(
             """insert into app.trades (ref, user_id, account_id, account_kind, symbol, direction, stake,
-                                       payout_pct, duration_s, entry_price, expires_at)
-               values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now() + make_interval(secs => %s))
+                                       payout_pct, duration_s, entry_price, price_source, opened_at, expires_at)
+               values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, to_timestamp(%s),
+                       to_timestamp(%s) + make_interval(secs => %s))
             returning *""",
             ("OB-" + code(7), user.id, acct["id"], body.account, body.symbol.strip(), body.direction, stake,
-             Decimal(str(body.payout_pct)), body.duration_s, entry, body.duration_s))
+             payout, body.duration_s, entry, source, opened, opened, body.duration_s))
         t = await cur.fetchone()
     return public(t, acct["balance"])
 
 
 @router.post("/trades/{ref}/settle")
 async def settle(ref: str, body: Settle, user: AuthUser = Depends(current_user)):
-    exit_price = _price(body.exit_price)
+    exit_price = _price(body.exit_price) if body.exit_price else None
+    t = await db.one("select expires_at, status from app.trades where ref = %s and user_id = %s", (ref, user.id))
+    if t and t["status"] == "open":
+        # asked a moment early (clocks differ): wait for expiry, so the feed has the exit price
+        wait = (t["expires_at"] - datetime.now(timezone.utc)).total_seconds()
+        if 0 < wait <= EARLY.total_seconds():
+            await asyncio.sleep(wait + 0.2)
     async with db.tx() as conn:
         t = await _mine(conn, ref, user.id)
         if t["status"] != "open":                       # already settled: same answer again
@@ -180,6 +225,8 @@ async def settle(ref: str, body: Settle, user: AuthUser = Depends(current_user))
             return public(t, (await cur.fetchone())["balance"])
         if datetime.now(timezone.utc) < t["expires_at"] - EARLY:
             raise HTTPException(status_code=409, detail="This contract has not expired yet.")
+        if t.get("price_source") != "server" and exit_price is None:
+            raise HTTPException(status_code=400, detail="This contract needs the exit price from your chart.")
         row, bal = await _settle(conn, t, exit_price=exit_price, by="price")
     return public(row, bal)
 

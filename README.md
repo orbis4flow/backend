@@ -109,7 +109,7 @@ Supabase's own emails (sign-up confirmation, password reset) come from Supabase.
 
 ## 7 · Market news and the economic calendar
 
-- News: `FINNHUB_API_KEY`, a free key from finnhub.io (60 calls a minute; the API caches for five minutes, so a busy site uses a handful an hour).
+- News and live forex, metals and index prices: `FINNHUB_API_KEY`, a free key from finnhub.io (60 calls a minute; news is cached for five minutes). Without it those markets are demo-only.
 - Calendar: the ForexFactory weekly feed, no key. Cached for an hour. It carries forecast and previous figures but no actuals.
 
 ## 8 · Automatic USDT deposits
@@ -124,7 +124,7 @@ Free, on TronGrid. A deposit request gets its own exact amount (50.37 USDT for a
 
 ## 9 · Referral earnings
 
-Counted hourly, per referrer per week (Monday to Sunday, Nairobi time): their referrals' real-money stakes x `REFERRAL_SPREAD_PCT` (default 0.75) x their tier (20, 28 or 35%, by referrals who traded real money in the last 30 days). A finished week is paid into the referrer's real balance from the Thursday after, as a `referral` transaction, with an email and SMS. Demo trades earn nothing, so this stays at zero until real-money trading opens.
+Counted hourly, per referrer per week (Monday to Sunday, Nairobi time): their referrals' real-money stakes x `REFERRAL_SPREAD_PCT` (default 0.75) x their tier (20, 28 or 35%, by referrals who traded real money in the last 30 days). A finished week is paid into the referrer's real balance from the Thursday after, as a `referral` transaction, with an email and SMS. Demo trades earn nothing, so only real-money stakes count.
 
 ## 10 · Preferences, two-factor and devices
 
@@ -201,6 +201,8 @@ All JSON. Signed-in routes take `Authorization: Bearer <access_token>`. Errors a
 | POST | `/sessions/revoke-others` | sign every other device out |
 | POST | `/webhooks/kora`, `/webhooks/payhero`, `/webhooks/paystack` | provider callbacks |
 | GET | `/health` | database and provider readiness |
+| GET | `/prices` | the last price per market: `{sym: {p, t, live, dp, payout}}` |
+| GET | `/prices/history?symbol=&seconds=` | up to an hour of prices, one a second, for the chart |
 | GET | `/status` | daily uptime per service for the status page (checked every five minutes; needs `sql/007_status.sql`) |
 
 `/docs` (the interactive API explorer) is on only when `ENV=development`.
@@ -220,13 +222,30 @@ To receive Kora or PayHero callbacks on your machine, expose port 8000 with a tu
 
 ## Trading
 
-Demo only. Placing takes the stake from the demo balance in the same transaction that opens the contract, and settling pays back stake plus payout on a win. The result comes from the entry and exit prices the client's chart saw, which is acceptable for practice money and not for real money, so `/trades` refuses `account: real`. A contract nobody settles (the tab was closed) is settled by the server 30 seconds after expiry, at even odds.
+Real and demo. Placing takes the stake in the same transaction that opens the contract, and settling pays back stake plus payout on a win.
+
+Prices are the server's (`app/services/prices.py`), never the browser's: the entry is the feed's last price when the contract is placed, the exit the last price at or before expiry, and the payout is the market's own. Unchanged price loses.
+
+| Markets | Source | Key |
+|---|---|---|
+| 11 coins (BTC, ETH, SOL, XRP, BNB, ADA, DOGE, LTC, DOT, LINK, POL as MATIC/USD, XLM) | Binance public market-data stream | none |
+| Forex, gold, silver, WTI, US 500, US 100, UK 100, GER 40 | OANDA prices over Finnhub's websocket | `FINNHUB_API_KEY` |
+| Volatility 75, Volatility 25, Boom 500 | generated on the server, one series for everyone | none |
+| USD/KES, XMR/USD | none: demo-only, on the client's chart | |
+
+- **Real money** is only staked on a market with a price under 15 seconds old (`GET /prices` says which are `live`); otherwise `/trades` answers 409 "closed for real money". Forex is closed at weekends. Real contracts run at least 5 seconds.
+- **A feed that drops** while a contract is open cannot vouch for its exit, so the contract is refunded (`status: void`). A redeploy restarts the feed, so contracts open across a deploy are refunded.
+- **One instance only.** The ticks live in the process's memory, so keep the Render service at one instance.
+- **Demo** contracts on a market with no feed still run on the client's chart; nobody can withdraw demo money.
+- A contract nobody settles (the tab was closed) is settled by the server 30 seconds after expiry: on the feed, or for a client-chart demo contract, at even odds.
+
+Needs `sql/008_real_trading.sql` (adds `price_source` and the `void` status).
 
 ## Next
 
 In the order they unblock the most:
 
-1. **A server-side price feed, then real-money trading.** Prices and settlement have to come from the server before a real balance can be staked: the backend records the entry and exit itself instead of trusting the browser. Crypto from Binance's public WebSocket, forex and metals from a provider such as Twelve Data, Finnhub or OANDA, and the synthetic indices generated on the server. The UI chart then draws from the same feed.
+1. **A paid forex feed** if Finnhub's free websocket proves too thin for some pairs (OANDA's own streaming API, or Twelve Data), and a price source for USD/KES.
 2. **Identity verification.** The verification page runs locally. Smile ID (built for African IDs, including Kenyan national ID and KRA PIN) or Sumsub, with their webhook setting a verified flag that withdrawals check.
 3. **Automated payouts.** Withdrawals are manual. Paystack Transfers can pay Kenyan bank accounts and M-Pesa from the Paystack balance you already hold.
 4. **Withdrawal status emails.** Approving or rejecting a withdrawal is an SQL query today, so it sends nothing; a small admin endpoint for it could email the user.

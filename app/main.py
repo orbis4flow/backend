@@ -14,9 +14,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import db, supabase_auth
-from .services import monitor, referrals as referral_jobs, tron
+from .services import monitor, prices, referrals as referral_jobs, tron
 from .config import get_settings
 from .routers import account, auth, market, me, payment_methods, payments, referrals, support, trades, webhooks
+from .routers import prices as prices_router
 
 # psycopg's async driver needs the selector loop on Windows (local dev only)
 if sys.platform == "win32":
@@ -30,9 +31,10 @@ log = logging.getLogger("obisflow")
 async def lifespan(_: FastAPI):
     await db.open_pool()
     stop = asyncio.Event()
-    # background jobs: USDT deposits to match, referral earnings to count and pay, uptime checks
+    # background jobs: USDT deposits to match, referral earnings to count and pay, uptime checks,
+    # and the live prices contracts settle on
     jobs = [asyncio.create_task(tron.watch(stop)), asyncio.create_task(referral_jobs.work(stop)),
-            asyncio.create_task(monitor.watch(stop))]
+            asyncio.create_task(monitor.watch(stop)), asyncio.create_task(prices.watch(stop))]
     yield
     stop.set()
     for j in jobs:
@@ -79,7 +81,7 @@ async def unexpected(_: Request, exc: Exception):
 
 
 for r in (auth.router, me.router, payment_methods.router, referrals.router, payments.router, trades.router,
-          market.router, account.router, support.router, webhooks.router):
+          market.router, prices_router.router, account.router, support.router, webhooks.router):
     app.include_router(r)
 
 

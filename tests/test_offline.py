@@ -340,3 +340,42 @@ def test_status_only_checks_what_is_switched_on(monkeypatch):
     keys = monitor._checks().keys()
     assert {"api", "trading", "withdraw", "usdt"} <= set(keys)
     assert "chat" not in keys and "card" not in keys
+
+
+# ------------------------------------------------------ server-side prices --
+def test_prices_settle_on_the_last_tick_before_expiry(monkeypatch):
+    from decimal import Decimal
+    from app.services import prices
+    s = prices._series["BTC/USD"]
+    s.ticks.clear()
+    s.alive_since = 1000.0
+    monkeypatch.setattr(prices.time, "time", lambda: 1100.0)
+    for t, p in [(1010, "100"), (1020, "101"), (1030, "99")]:
+        s.ticks.append((float(t), Decimal(p)))
+    assert prices.at("BTC/USD", 1025, opened=1005) == Decimal("101")
+    assert prices.at("BTC/USD", 1200, opened=1005) is None          # expiry not reached yet
+    assert prices.at("BTC/USD", 1025, opened=995) is None           # feed came up after the contract opened
+    assert prices.latest("BTC/USD") is None                          # 70 s old: too stale to open at
+    s.alive_since = None
+    assert prices.at("BTC/USD", 1025, opened=1005) is None          # feed down: cannot vouch for it
+
+
+def test_real_trades_refused_without_a_live_price():
+    from app.security import current_user, AuthUser
+    from app.main import app as the_app
+    the_app.dependency_overrides[current_user] = lambda: AuthUser(id="u1", email="a@b.c", token="t")
+    try:
+        async def ensure(*a, **k):
+            return {}
+        import app.services.profiles as prof
+        orig = prof.for_user
+        prof.for_user = ensure
+        r = client.post("/trades", json={"account": "real", "symbol": "USD/KES", "direction": "Rise", "stake": 5,
+                                         "payout_pct": 100, "duration_s": 6, "entry_price": "1"})
+        assert r.status_code == 409 and "demo-only" in r.json()["detail"]
+        r = client.post("/trades", json={"account": "real", "symbol": "EUR/USD", "direction": "Rise", "stake": 5,
+                                         "payout_pct": 100, "duration_s": 6, "entry_price": "1"})
+        assert r.status_code == 409 and "closed for real money" in r.json()["detail"]
+    finally:
+        prof.for_user = orig
+        the_app.dependency_overrides.clear()
