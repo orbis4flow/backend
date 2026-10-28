@@ -479,3 +479,41 @@ def test_admin_vip_changes_need_the_token(monkeypatch):
     assert client.post("/admin/users/abc/vip", json={"vip": True}).status_code == 401
     assert client.post("/admin/users/abc/balance", json={"action": "credit", "amount_usd": 10}).status_code == 401
     admin_router._misses.clear()
+
+
+# ------------------------------------------------------------ expiry --
+def test_unfinished_deposits_are_asked_once_more_then_removed(monkeypatch):
+    import asyncio
+    from app.services import deposits
+    old = {"id": 1, "reference": "DP-OLD", "provider": "payhero", "status": "processing", "user_id": "u",
+           "amount_usd": 5, "method": "mpesa", "expire_s": 120}
+    paid = {**old, "id": 2, "reference": "DP-PAID"}
+    deleted, recorded = [], []
+
+    async def many(sql, args=()):
+        assert "provider <> 'tron'" in sql
+        return [old, paid]
+
+    async def one(sql, args=()):
+        deleted.append(args[0])
+        return {"reference": "x"}
+
+    async def ask(tx):
+        return "completed" if tx["reference"] == "DP-PAID" else "processing"
+
+    async def record(*a, **k):
+        recorded.append(k["ref"])
+
+    monkeypatch.setattr(deposits.db, "many", many)
+    monkeypatch.setattr(deposits.db, "one", one)
+    monkeypatch.setattr(deposits, "_ask", ask)
+    monkeypatch.setattr(deposits.events, "record", record)
+    assert asyncio.run(deposits.expire()) == 1
+    assert deleted == [1] and recorded == ["DP-OLD"]
+
+
+def test_deposit_expiry_defaults():
+    from app.config import Settings
+    s = Settings(_env_file=None)
+    assert s.deposit_expire_s == 120 and s.checkout_expire_s >= 600
+

@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import db, supabase_auth
-from .services import monitor, prices, referrals as referral_jobs, tron
+from .services import deposits, monitor, prices, referrals as referral_jobs, tron
 from .config import get_settings
 from .routers import account, auth, market, me, payment_methods, payments, referrals, support, trades, webhooks
 from .routers import admin as admin_router, prices as prices_router
@@ -32,9 +32,10 @@ async def lifespan(_: FastAPI):
     await db.open_pool()
     stop = asyncio.Event()
     # background jobs: USDT deposits to match, referral earnings to count and pay, uptime checks,
-    # and the live prices contracts settle on
+    # the live prices contracts settle on, and unfinished deposits to remove
     jobs = [asyncio.create_task(tron.watch(stop)), asyncio.create_task(referral_jobs.work(stop)),
-            asyncio.create_task(monitor.watch(stop)), asyncio.create_task(prices.watch(stop))]
+            asyncio.create_task(monitor.watch(stop)), asyncio.create_task(prices.watch(stop)),
+            asyncio.create_task(deposits.watch(stop))]
     yield
     stop.set()
     for j in jobs:

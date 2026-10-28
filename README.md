@@ -139,9 +139,13 @@ Counted hourly, per referrer per week (Monday to Sunday, Nairobi time): their re
 
 A withdrawal takes the amount plus the fee from the balance at once and waits in review. Pay it yourself (M-Pesa, bank or USDT), then mark it paid on the admin site with your receipt, or reject it there, which refunds the whole amount and emails the user (or use `sql/admin/withdrawals.sql`). For M-Pesa, `local_amount` is the KSh to send.
 
-## 12 · VIP accounts
+## 12 · Unfinished deposits are removed
 
-A VIP is a demonstration account. Only the admin site makes one (a user's page → Make VIP), and only from an account with nothing in its real balance. The admin site then credits or debits its real balance, and it trades real contracts with that money on the same prices as everyone. A VIP cannot deposit or withdraw, its trades earn its referrer nothing, and the overview's totals leave it out. Removing VIP takes the credited balance back to zero. Needs `sql/012_vip.sql`.
+An M-Pesa prompt deposit still open 2 minutes after it started (`DEPOSIT_EXPIRE_S`, 120) is checked with the provider once more, credited if it was paid, and deleted if not. Card and Kora checkout deposits get 15 minutes (`CHECKOUT_EXPIRE_S`, 900), since they are paid on another site. USDT requests keep their own window. Each removal is logged as `deposit.expired`; a callback that arrives afterwards is kept in `webhook_events` as "unknown reference".
+
+## 13 · VIP accounts
+
+A VIP is a demonstration account. Only the admin site makes one (a user's page → Make VIP), and only from an account with nothing in its real balance (any unfinished deposit is removed; a withdrawal in review stays, to pay or reject as usual). The admin site then credits or debits its real balance, and it trades real contracts with that money on the same prices as everyone. A VIP cannot deposit or withdraw, its trades earn its referrer nothing, and the overview's totals leave it out. Removing VIP takes the credited balance back to zero. Needs `sql/012_vip.sql`.
 
 ## Money rules
 

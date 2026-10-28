@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     # ---------------------------------------------------------- money ---
     usd_kes_rate: float = 129.5                   # what M-Pesa amounts are converted at
     min_deposit_usd: float = 5.0
+    deposit_expire_s: int = 120                   # an M-Pesa prompt deposit unfinished this long is deleted
+    checkout_expire_s: int = 900                  # the same for a payment page (card, Kora checkout), filled in elsewhere
     max_deposit_usd: float = 10000.0
     min_withdraw_usd: float = 5.0
     withdraw_fee_usd: float = 1.0                 # charged on top of the amount withdrawn

@@ -327,11 +327,11 @@ async def set_vip(user_id: str, body: VipChange, ip: str = Depends(admin)):
                 raise HTTPException(status_code=409, detail=(
                     f"This user has ${row['balance']:,.2f} of their own money. A VIP's real balance is only "
                     "ever money credited here, so make VIPs from accounts with nothing in them."))
-            cur = await conn.execute(
-                """select 1 from app.transactions where user_id = %s and type in ('deposit', 'withdrawal')
-                      and status in ('pending', 'processing', 'review') limit 1""", (user_id,))
-            if await cur.fetchone():
-                raise HTTPException(status_code=409, detail="This user has a deposit or withdrawal still open.")
+            # an unfinished deposit would credit their own money into a VIP account: it goes. A
+            # withdrawal in review stays, for you to pay or reject as usual.
+            await conn.execute(
+                """delete from app.transactions where user_id = %s and type = 'deposit'
+                      and status in ('pending', 'processing')""", (user_id,))
         elif row["balance"] > 0:
             await _move(conn, user_id, row["account_id"], "debit", row["balance"], "VIP removed")
             await conn.execute("update app.accounts set balance = 0 where id = %s", (row["account_id"],))

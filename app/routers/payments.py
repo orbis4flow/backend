@@ -380,7 +380,8 @@ async def payment(ref: str, user: AuthUser = Depends(current_user)):
     so the UI can poll this until the payment settles."""
     tx = await db.one("select * from app.transactions where reference = %s and user_id = %s", (ref, user.id))
     if not tx:
-        raise HTTPException(status_code=404, detail="That payment was not found.")
+        raise HTTPException(status_code=404, detail="That payment was not found. Unfinished deposits are removed, "
+                                                    "so start a new one.")
     age = (datetime.now(timezone.utc) - tx["created_at"]).total_seconds()
     if tx["status"] in ("pending", "processing") and (age > 8 or tx["provider"] == "tron"):
         if tx["provider"] == "kora":
