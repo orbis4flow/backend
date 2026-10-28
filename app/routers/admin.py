@@ -6,21 +6,29 @@ tokens are limited to 10 per 15 minutes per address.
 
 Reads cover users, money, trades and the price feed. The few writes are the
 ones that used to be SQL run by hand (sql/admin): approving or rejecting a
-withdrawal and verifying or blocking a payment method. Each is recorded in
-app.admin_actions (sql/009_admin.sql), and the user is told by email.
+withdrawal, verifying or blocking a payment method, and VIP accounts (making
+one, crediting or debiting its real balance). Each is recorded in
+app.admin_actions (sql/009_admin.sql); withdrawal outcomes are emailed.
+
+VIP accounts (sql/012_vip.sql) are demonstration accounts whose real balance
+is only ever money credited here. They cannot deposit or withdraw, and the
+totals on the overview leave them out.
 """
 import hmac
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
 from .. import db
 from ..config import get_settings
 from ..services import notify, prices
+from ..util import reference, usd
 
 router = APIRouter(prefix="/admin", tags=["admin"], include_in_schema=False)
 
@@ -69,10 +77,11 @@ async def overview(_: str = Depends(admin)):
     day = datetime.now(timezone.utc) - timedelta(hours=24)
     week = datetime.now(timezone.utc) - timedelta(days=7)
     users = await db.one(
-        "select count(*) as n, count(*) filter (where created_at >= %s) as new from app.profiles", (day,))
+        """select count(*) as n, count(*) filter (where created_at >= %s) as new,
+                  count(*) filter (where is_vip) as vip from app.profiles""", (day,))
     money = await db.one(
-        """select coalesce(sum(balance) filter (where kind = 'real'), 0) as real_balances
-             from app.accounts""")
+        """select coalesce(sum(a.balance) filter (where a.kind = 'real'), 0) as real_balances
+             from app.accounts a join app.profiles p on p.id = a.user_id where not p.is_vip""")
     tx = await db.one(
         """select
              coalesce(sum(net_usd) filter (where type = 'deposit' and status = 'completed' and completed_at >= %s), 0) as dep_day,
@@ -86,14 +95,17 @@ async def overview(_: str = Depends(admin)):
     trades = await db.one(
         """select count(*) as n, coalesce(sum(stake), 0) as volume, coalesce(-sum(profit), 0) as house,
                   count(distinct user_id) as traders
-             from app.trades where account_kind = 'real' and status <> 'open' and settled_at >= %s""", (day,))
+             from app.trades t where account_kind = 'real' and status <> 'open' and settled_at >= %s
+              and not exists (select 1 from app.profiles p where p.id = t.user_id and p.is_vip)""", (day,))
     open_real = await db.one(
-        "select count(*) as n, coalesce(sum(stake), 0) as at_risk from app.trades where account_kind = 'real' and status = 'open'")
+        """select count(*) as n, coalesce(sum(stake), 0) as at_risk from app.trades t
+            where account_kind = 'real' and status = 'open'
+              and not exists (select 1 from app.profiles p where p.id = t.user_id and p.is_vip)""")
     methods = await db.one(
         "select count(*) as n from app.payment_methods where status = 'pending' and removed_at is null")
     snap = prices.snapshot()
     return {
-        "users": users["n"], "newUsers24h": users["new"],
+        "users": users["n"], "newUsers24h": users["new"], "vipUsers": users["vip"],
         "realBalances": _f(money["real_balances"]),
         "deposits24h": _f(tx["dep_day"]), "deposits24hCount": tx["dep_day_n"], "deposits7d": _f(tx["dep_week"]),
         "depositsStuck": tx["dep_stuck"],
@@ -109,25 +121,26 @@ async def overview(_: str = Depends(admin)):
 
 # ------------------------------------------------------------------- users --
 @router.get("/users")
-async def users(q: str = "", limit: int = Query(default=50, ge=1, le=200), _: str = Depends(admin)):
+async def users(q: str = "", vip: bool = False, limit: int = Query(default=50, ge=1, le=200), _: str = Depends(admin)):
     like = f"%{q.strip().lower()}%"
     digits = "".join(ch for ch in q if ch.isdigit())
     rows = await db.many(
-        """select p.id, p.email, p.full_name, p.phone, p.country_name, p.created_at,
+        """select p.id, p.email, p.full_name, p.phone, p.country_name, p.created_at, p.is_vip,
                   coalesce(max(a.balance) filter (where a.kind = 'real'), 0) as real_balance,
                   coalesce(max(a.balance) filter (where a.kind = 'demo'), 0) as demo_balance
              from app.profiles p
              left join app.accounts a on a.user_id = p.id
-            where %s = '' or lower(p.email) like %s or lower(coalesce(p.full_name, '')) like %s
+            where (%s = '' or lower(p.email) like %s or lower(coalesce(p.full_name, '')) like %s
                   or (%s <> '' and regexp_replace(coalesce(p.phone, ''), '\\D', '', 'g') like %s)
-                  or p.referral_code = upper(%s)
+                  or p.referral_code = upper(%s))
+              and (not %s or p.is_vip)
             group by p.id
             order by p.created_at desc
             limit %s""",
-        (q.strip(), like, like, digits, f"%{digits[-9:]}%", q.strip(), limit))
+        (q.strip(), like, like, digits, f"%{digits[-9:]}%", q.strip(), vip, limit))
     return [{"id": str(r["id"]), "email": r["email"], "name": r["full_name"] or "", "phone": r["phone"] or "",
              "country": r["country_name"], "createdAt": _iso(r["created_at"]),
-             "real": _f(r["real_balance"]), "demo": _f(r["demo_balance"])} for r in rows]
+             "real": _f(r["real_balance"]), "demo": _f(r["demo_balance"]), "vip": r["is_vip"]} for r in rows]
 
 
 @router.get("/users/{user_id}")
@@ -162,6 +175,7 @@ async def user(user_id: str, _: str = Depends(admin)):
         "id": str(p["id"]), "email": p["email"], "name": p["full_name"] or "", "phone": p["phone"] or "",
         "country": p["country_name"], "currency": p["currency"], "referralCode": p["referral_code"],
         "referredBy": ref["email"] if ref else None, "createdAt": _iso(p["created_at"]),
+        "vip": bool(p.get("is_vip")), "vipSince": _iso(p.get("vip_since")),
         "balances": {a["kind"]: _f(a["balance"]) for a in accounts},
         "deposited": _f(summary["deposited"]), "withdrawn": _f(summary["withdrawn"]), "realPl": _f(real_pl["pl"]),
         "transactions": [_tx(t) for t in txs],
@@ -189,12 +203,13 @@ def _trade(t: dict) -> dict:
             "exit": format(t["exit_price"].normalize(), "f") if t["exit_price"] is not None else None,
             "status": t["status"], "profit": _f(t["profit"]) if t["profit"] is not None else None,
             "openedAt": _iso(t["opened_at"]), "settledAt": _iso(t["settled_at"]),
-            **({"email": t["email"], "userId": str(t["user_id"])} if "email" in t else {})}
+            **({"email": t["email"], "userId": str(t["user_id"])} if "email" in t else {}),
+            **({"vip": t["is_vip"]} if "is_vip" in t else {})}
 
 
 # ------------------------------------------------------------ transactions --
 @router.get("/transactions")
-async def transactions(type: Literal["deposit", "withdrawal", "referral", "all"] = "all",
+async def transactions(type: Literal["deposit", "withdrawal", "referral", "credit", "debit", "all"] = "all",
                        status: Literal["waiting", "pending", "completed", "failed", "all"] = "all",
                        limit: int = Query(default=100, ge=1, le=500), _: str = Depends(admin)):
     where, args = ["true"], []
@@ -253,6 +268,103 @@ async def reject(ref: str, body: Reject, ip: str = Depends(admin)):
     return _tx(t)
 
 
+# --------------------------------------------------------------------- vip --
+class VipChange(BaseModel):
+    vip: bool
+    note: str | None = Field(default=None, max_length=300)
+
+
+class BalanceChange(BaseModel):
+    action: Literal["credit", "debit"]
+    amount_usd: float = Field(gt=0, le=1_000_000)
+    note: str | None = Field(default=None, max_length=300)
+
+
+async def _real(conn, user_id: str) -> dict:
+    """The user's VIP flag and real account, locked for the change."""
+    try:
+        cur = await conn.execute(
+            """select p.is_vip, a.id as account_id, a.balance from app.profiles p
+                 join app.accounts a on a.user_id = p.id and a.kind = 'real'
+                where p.id = %s for update of p, a""", (user_id,))
+    except Exception:                                   # not a uuid
+        raise HTTPException(status_code=404, detail="No such user.")
+    row = await cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="No such user.")
+    return row
+
+
+async def _move(conn, user_id: str, account_id, type: str, amount: Decimal, note: str | None) -> dict:
+    """A completed credit or debit, so the user's history shows where the money came from."""
+    cur = await conn.execute(
+        """insert into app.transactions (user_id, account_id, type, method, provider, status, amount_usd, fee_usd,
+                                         net_usd, reference, destination, meta, completed_at)
+           values (%s, %s, %s, 'admin', 'admin', 'completed', %s, 0, %s, %s, 'VIP account', %s, now())
+           returning *""",
+        (user_id, account_id, type, amount, amount, reference("CR" if type == "credit" else "DB"),
+         Jsonb({"note": note} if note else {})))
+    return await cur.fetchone()
+
+
+@router.post("/users/{user_id}/vip")
+async def set_vip(user_id: str, body: VipChange, ip: str = Depends(admin)):
+    """Make a user a VIP, or a VIP an ordinary user again. A user becomes a VIP
+    only with nothing in the real account, so no real money is ever locked in
+    one; a VIP stops being one with its credited balance taken back to zero."""
+    note = (body.note or "").strip() or None
+    async with db.tx() as conn:
+        row = await _real(conn, user_id)
+        if row["is_vip"] == body.vip:
+            raise HTTPException(status_code=409, detail="Already a VIP." if body.vip else "Not a VIP.")
+        cur = await conn.execute(
+            "select 1 from app.trades where user_id = %s and account_kind = 'real' and status = 'open' limit 1",
+            (user_id,))
+        if await cur.fetchone():
+            raise HTTPException(status_code=409, detail="Wait for this user's open real contracts to finish first.")
+        if body.vip:
+            if row["balance"] > 0:
+                raise HTTPException(status_code=409, detail=(
+                    f"This user has ${row['balance']:,.2f} of their own money. A VIP's real balance is only "
+                    "ever money credited here, so make VIPs from accounts with nothing in them."))
+            cur = await conn.execute(
+                """select 1 from app.transactions where user_id = %s and type in ('deposit', 'withdrawal')
+                      and status in ('pending', 'processing', 'review') limit 1""", (user_id,))
+            if await cur.fetchone():
+                raise HTTPException(status_code=409, detail="This user has a deposit or withdrawal still open.")
+        elif row["balance"] > 0:
+            await _move(conn, user_id, row["account_id"], "debit", row["balance"], "VIP removed")
+            await conn.execute("update app.accounts set balance = 0 where id = %s", (row["account_id"],))
+        await conn.execute(
+            "update app.profiles set is_vip = %s, vip_since = case when %s then now() end where id = %s",
+            (body.vip, body.vip, user_id))
+        await _log("vip.grant" if body.vip else "vip.remove", user_id, user_id, note, ip, conn)
+    return {"id": user_id, "vip": body.vip}
+
+
+@router.post("/users/{user_id}/balance")
+async def change_balance(user_id: str, body: BalanceChange, ip: str = Depends(admin)):
+    """Credit or debit a VIP's real balance. Ordinary users' balances are never
+    touched from here: their money only moves through deposits and withdrawals."""
+    amount = usd(body.amount_usd)
+    note = (body.note or "").strip() or None
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Enter an amount of at least $0.01.")
+    async with db.tx() as conn:
+        row = await _real(conn, user_id)
+        if not row["is_vip"]:
+            raise HTTPException(status_code=403, detail="Only VIP accounts can be credited. Make this user a VIP first.")
+        if body.action == "debit" and amount > row["balance"]:
+            raise HTTPException(status_code=400, detail=f"The real balance is only ${row['balance']:,.2f}.")
+        t = await _move(conn, user_id, row["account_id"], body.action, amount, note)
+        cur = await conn.execute("update app.accounts set balance = balance + %s where id = %s returning balance",
+                                 (amount if body.action == "credit" else -amount, row["account_id"]))
+        balance = (await cur.fetchone())["balance"]
+        await _log(f"vip.{body.action}", t["reference"], user_id, f"${amount:,.2f}" + (f": {note}" if note else ""),
+                   ip, conn)
+    return {"transaction": _tx(t), "real": _f(balance)}
+
+
 # --------------------------------------------------------- payment methods --
 @router.get("/payment-methods")
 async def payment_methods(status: Literal["pending", "verified", "disabled", "all"] = "pending",
@@ -301,7 +413,7 @@ async def trades(account: Literal["real", "demo", "all"] = "real", status: Liter
     elif status == "settled":
         where.append("t.status <> 'open'")
     rows = await db.many(
-        f"""select t.*, p.email from app.trades t join app.profiles p on p.id = t.user_id
+        f"""select t.*, p.email, p.is_vip from app.trades t join app.profiles p on p.id = t.user_id
              where {' and '.join(where)} order by t.opened_at desc limit %s""", (*args, limit))
     return [_trade(t) for t in rows]
 

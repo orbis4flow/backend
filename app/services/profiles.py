@@ -1,6 +1,7 @@
 """Profiles, their two accounts, and their referral code."""
 from decimal import Decimal
 
+from fastapi import HTTPException
 from psycopg import AsyncConnection
 from psycopg.errors import UniqueViolation
 
@@ -88,8 +89,17 @@ def public(p: dict, account_id: str | None = None) -> dict:
         "referralCode": p["referral_code"],
         "referralLink": f"{s.frontend_url}/r/{p['referral_code']}",
         "accountId": account_id,
+        "vip": bool(p.get("is_vip")),
         "createdAt": p["created_at"].isoformat(),
     }
+
+
+def not_vip(p: dict, what: str) -> None:
+    """VIP accounts (sql/012_vip.sql) are for demonstrations: their real balance
+    is credited by obisflow, so no money goes in or out of them."""
+    if p.get("is_vip"):
+        raise HTTPException(status_code=403, detail=f"VIP accounts are for demonstrations and cannot {what}. "
+                                                    "Their balance is credited by obisflow.")
 
 
 async def accounts(user_id: str) -> list[dict]:

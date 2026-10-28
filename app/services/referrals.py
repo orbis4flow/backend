@@ -64,13 +64,14 @@ async def count_week(week_start: date) -> int:
              from app.trades t
              join app.profiles p on p.id = t.user_id
             where p.referred_by is not null and t.account_kind = 'real' and t.status <> 'open'
+              and not p.is_vip                      -- a VIP stakes credited money (sql/012_vip.sql)
               and t.settled_at >= %s and t.settled_at < %s
             group by p.referred_by""", (start, end))
     for r in rows:
         active_30 = await db.one(
             """select count(distinct t.user_id) as n
                  from app.trades t join app.profiles p on p.id = t.user_id
-                where p.referred_by = %s and t.account_kind = 'real' and t.status <> 'open'
+                where p.referred_by = %s and t.account_kind = 'real' and t.status <> 'open' and not p.is_vip
                   and t.settled_at >= %s and t.settled_at < %s""",
             (r["referrer"], end - timedelta(days=30), end))
         tier = tier_for(active_30["n"])

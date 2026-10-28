@@ -445,3 +445,37 @@ def test_backfilled_history_is_a_walk_that_ends_at_the_current_price():
     # a walk wanders far more than one step's size; noise around one level does not
     assert max(ps) - min(ps) > 10 * statistics.pstdev(steps)
     prices._series[m.sym].ticks.clear()
+
+
+# --------------------------------------------------------------------- vip --
+def test_vip_accounts_cannot_move_money():
+    import pytest
+    from fastapi import HTTPException
+    from app.services import profiles
+    profiles.not_vip({"is_vip": False}, "deposit")
+    profiles.not_vip({}, "deposit")                                   # before sql/012 runs
+    with pytest.raises(HTTPException) as e:
+        profiles.not_vip({"is_vip": True}, "withdraw")
+    assert e.value.status_code == 403 and "cannot withdraw" in e.value.detail
+
+
+def test_vip_credits_and_debits_read_right_in_history():
+    from datetime import datetime, timezone
+    from decimal import Decimal
+    from app.routers.payments import public
+    row = {"created_at": datetime.now(timezone.utc), "completed_at": None, "reference": "DB-1", "status": "completed",
+           "amount_usd": Decimal("50"), "fee_usd": Decimal("0"), "net_usd": Decimal("50"), "local_amount": None,
+           "local_currency": None, "destination": "VIP account", "failure_reason": None, "method": "admin"}
+    assert public({**row, "type": "debit"})["amount"] == -50
+    assert public({**row, "type": "credit"})["amount"] == 50
+    assert public({**row, "type": "credit"})["method"] == "obisflow"
+
+
+def test_admin_vip_changes_need_the_token(monkeypatch):
+    from app.config import get_settings
+    from app.routers import admin as admin_router
+    monkeypatch.setattr(get_settings(), "admin_token", "x" * 40)
+    admin_router._misses.clear()
+    assert client.post("/admin/users/abc/vip", json={"vip": True}).status_code == 401
+    assert client.post("/admin/users/abc/balance", json={"action": "credit", "amount_usd": 10}).status_code == 401
+    admin_router._misses.clear()

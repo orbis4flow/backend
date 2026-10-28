@@ -36,8 +36,9 @@ def _ms(start: float) -> int:
     return int((time.monotonic() - start) * 1000)
 
 METHOD_LABEL = {"mpesa": "M-Pesa", "card": "Card", "bank": "Bank transfer", "usdt": "USDT (TRC-20)",
-                "referral": "Referral earnings"}
-TYPE_LABEL = {"deposit": "Deposit", "withdrawal": "Withdrawal", "referral": "Referral"}
+                "referral": "Referral earnings", "admin": "obisflow"}
+TYPE_LABEL = {"deposit": "Deposit", "withdrawal": "Withdrawal", "referral": "Referral",
+              "credit": "VIP credit", "debit": "VIP debit"}
 STATUS_LABEL = {"pending": "Pending", "processing": "Processing", "review": "In review",
                 "completed": "Completed", "failed": "Failed", "cancelled": "Cancelled"}
 
@@ -63,7 +64,7 @@ class Withdrawal(BaseModel):
 
 
 def public(t: dict) -> dict:
-    sign = -1 if t["type"] == "withdrawal" else 1
+    sign = -1 if t["type"] in ("withdrawal", "debit") else 1
     return {
         # for display, as the cashier table reads it
         "when": show_date(t["created_at"]),
@@ -120,6 +121,7 @@ async def deposit_mpesa(body: MpesaDeposit, user: AuthUser = Depends(current_use
     if not s.mpesa_ready:
         raise HTTPException(status_code=503, detail="M-Pesa deposits are not switched on yet.")
     p = await profiles.for_user(user)
+    profiles.not_vip(p, "deposit")
     amount = _deposit_amount(body.amount_usd)
     await limits.can_deposit(user.id, amount)
 
@@ -224,6 +226,7 @@ async def deposit_card(body: CardDeposit, user: AuthUser = Depends(current_user)
     if not s.paystack_ready:
         raise HTTPException(status_code=503, detail="Card deposits are not switched on yet.")
     p = await profiles.for_user(user)
+    profiles.not_vip(p, "deposit")
     amount = _deposit_amount(body.amount_usd)
     await limits.can_deposit(user.id, amount)
     fee = usd(amount * Decimal(str(s.card_fee_pct)) / 100)
@@ -268,7 +271,7 @@ async def deposit_usdt(body: UsdtDeposit, user: AuthUser = Depends(current_user)
     """An exact amount to send. The deposit credits itself when a confirmed
     transfer of exactly that much reaches the address (services/tron.py)."""
     s = get_settings()
-    await profiles.for_user(user)
+    profiles.not_vip(await profiles.for_user(user), "deposit")
     base = _deposit_amount(body.amount_usd)
     await limits.can_deposit(user.id, base + 1)          # the exact amount can be up to 99 cents more
     for _ in range(12):
@@ -322,7 +325,7 @@ async def _confirm_withdrawal(user: AuthUser, code: str | None) -> None:
 @router.post("/payments/withdraw", status_code=201)
 async def withdraw(body: Withdrawal, user: AuthUser = Depends(current_user)):
     s = get_settings()
-    await profiles.for_user(user)
+    profiles.not_vip(await profiles.for_user(user), "withdraw")
     amount = usd(body.amount_usd)
     fee = usd(s.withdraw_fee_usd)
     if amount < usd(s.min_withdraw_usd):

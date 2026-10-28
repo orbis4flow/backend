@@ -139,6 +139,10 @@ Counted hourly, per referrer per week (Monday to Sunday, Nairobi time): their re
 
 A withdrawal takes the amount plus the fee from the balance at once and waits in review. Pay it yourself (M-Pesa, bank or USDT), then mark it paid on the admin site with your receipt, or reject it there, which refunds the whole amount and emails the user (or use `sql/admin/withdrawals.sql`). For M-Pesa, `local_amount` is the KSh to send.
 
+## 12 · VIP accounts
+
+A VIP is a demonstration account. Only the admin site makes one (a user's page → Make VIP), and only from an account with nothing in its real balance. The admin site then credits or debits its real balance, and it trades real contracts with that money on the same prices as everyone. A VIP cannot deposit or withdraw, its trades earn its referrer nothing, and the overview's totals leave it out. Removing VIP takes the credited balance back to zero. Needs `sql/012_vip.sql`.
+
 ## Money rules
 
 | Rule | |
@@ -201,7 +205,7 @@ All JSON. Signed-in routes take `Authorization: Bearer <access_token>`. Errors a
 | POST | `/sessions/revoke-others` | sign every other device out |
 | POST | `/webhooks/kora`, `/webhooks/payhero`, `/webhooks/paystack` | provider callbacks |
 | GET | `/health` | database and provider readiness |
-| GET, POST | `/admin/*` | the admin site's API (github.com/Deon62/adminobis); exists only with `ADMIN_TOKEN` set, needs `sql/009_admin.sql`, and `sql/010_events.sql` for its Logs page |
+| GET, POST | `/admin/*` | the admin site's API (github.com/Deon62/adminobis); exists only with `ADMIN_TOKEN` set, needs `sql/009_admin.sql`, `sql/010_events.sql` for its Logs page, and `sql/012_vip.sql` |
 | GET | `/prices` | the last price per market: `{sym: {p, t, live, dp, payout}}` |
 | GET | `/prices/history?symbol=&seconds=` | up to an hour of ticks, for the chart |
 | GET | `/prices/stream?symbol=` | every tick of one market, as server-sent events |
