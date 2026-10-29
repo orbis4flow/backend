@@ -362,6 +362,7 @@ async def change_balance(user_id: str, body: BalanceChange, ip: str = Depends(ad
         balance = (await cur.fetchone())["balance"]
         await _log(f"vip.{body.action}", t["reference"], user_id, f"${amount:,.2f}" + (f": {note}" if note else ""),
                    ip, conn)
+    notify._later(notify.vip_balance(t, balance))
     return {"transaction": _tx(t), "real": _f(balance)}
 
 

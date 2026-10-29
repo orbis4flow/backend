@@ -517,3 +517,22 @@ def test_deposit_expiry_defaults():
     s = Settings(_env_file=None)
     assert s.deposit_expire_s == 120 and s.checkout_expire_s >= 600
 
+
+def test_vip_credit_text_names_obisflow(monkeypatch):
+    import asyncio
+    from decimal import Decimal
+    from app.services import notify
+    sent = []
+
+    async def person(uid):
+        return {"id": uid, "email": "v@x.co", "full_name": "V", "phone": "+254712345678"}
+
+    monkeypatch.setattr(notify, "_person", person)
+    monkeypatch.setattr(notify, "sms", lambda uid, kind, to, msg: sent.append((kind, to, msg)))
+    tx = {"user_id": "u", "type": "credit", "net_usd": Decimal("500"), "reference": "CR-1"}
+    asyncio.run(notify.vip_balance(tx, Decimal("1250")))
+    asyncio.run(notify.vip_balance({**tx, "type": "debit", "reference": "DB-1"}, Decimal("750")))
+    assert sent[0] == ("vip_credit", "+254712345678",
+                       "obisflow: $500.00 credited to your VIP account. Balance $1,250.00. Ref CR-1.")
+    assert "debited from" in sent[1][2] and "M-Pesa" not in sent[0][2]
+

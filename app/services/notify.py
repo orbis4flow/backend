@@ -232,6 +232,17 @@ async def withdrawal_rejected(tx: dict) -> None:
           [("Reference", tx["reference"])], ("View cashier", f"{s.frontend_url}/cashier"))
 
 
+async def vip_balance(tx: dict, balance) -> None:
+    """A text to a VIP when the admin site credits or debits its real balance.
+    It names obisflow as the source, never a payment provider."""
+    p = await _person(tx["user_id"])
+    if not p:
+        return
+    what = "credited to" if tx["type"] == "credit" else "debited from"
+    sms(p["id"], f"vip_{tx['type']}", p["phone"],
+        f"obisflow: {_money(tx['net_usd'])} {what} your VIP account. Balance {_money(balance)}. Ref {tx['reference']}.")
+
+
 async def method_added(user_id, label: str, masked: str) -> None:
     p = await _person(user_id)
     if not p:
