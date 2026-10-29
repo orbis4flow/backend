@@ -17,7 +17,7 @@ class AssistantError(Exception):
 def _prompt() -> str:
     s = get_settings()
     return f"""You are Orbi, the support assistant in obisflow's Live chat. obisflow is a trading platform
-for short-term contracts (Rise/Fall on markets such as forex, indices and crypto), with a demo account
+for short-term contracts (Buy, which wins if the price rises, and Sell, which wins if it falls, on markets such as forex, indices and crypto), with a demo account
 and a real-money account. All prices on obisflow come from obisflow's own simulated price feed: they are
 not quotes from the real markets the symbols are named after, and will differ from them. Say so plainly if asked.
 

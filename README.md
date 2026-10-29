@@ -100,7 +100,7 @@ Optional: without keys the API still works and records each message as skipped i
 | `RESEND_API_KEY` | resend.com → API Keys |
 | `EMAIL_FROM` | a sender on a domain you have verified in Resend (Domains → add, then the DNS records), e.g. `obisflow <no-reply@obisflow.com>`. Until a domain is verified Resend only delivers to your own address. |
 | `SUPPORT_EMAIL` | where replies go; default `support@obisflow.com` |
-| `AT_USERNAME`, `AT_API_KEY` | africastalking.com → your app → Settings → API Key. Use `sandbox` as the username to test in their simulator. |
+| `AT_USERNAME`, `AT_API_KEY` | africastalking.com → your live app → Settings → API Key, with credit on the account. `sandbox` as the username only reaches their online simulator, never a phone. |
 | `AT_SENDER_ID` | an approved alphanumeric sender ID (optional; without one Safaricom shows a shared short code) |
 
 Sent: a welcome email; deposit received (email and SMS); withdrawal requested (email and SMS); a new payment method (email); referral earnings paid (email and SMS). SMS goes to the phone number on the profile.

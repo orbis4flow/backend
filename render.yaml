@@ -30,6 +30,13 @@ services:
         sync: false
       - key: PAYHERO_CHANNEL_ID
         sync: false
+      # africastalking.com → your live app → Settings → API Key: SMS (codes, deposit and withdrawal texts)
+      - key: AT_USERNAME
+        sync: false
+      - key: AT_API_KEY
+        sync: false
+      - key: AT_SENDER_ID
+        sync: false
       # console.groq.com → API Keys (free): the Live chat assistant
       - key: GROQ_API_KEY
         sync: false

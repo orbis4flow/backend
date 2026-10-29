@@ -101,29 +101,48 @@ def email(user_id, kind: str, to: str, subject: str, title: str, lines: list[str
 
 
 # --------------------------------------------------------------------- SMS --
+# 100 processed, 101 sent, 102 queued: all three mean Africa's Talking has it
+AT_ACCEPTED = {100, 101, 102}
+AT_REASONS = {401: "held for risk review", 402: "that sender ID is not registered", 403: "not a valid phone number",
+              404: "that kind of number is not supported", 405: "not enough credit on the Africa's Talking account",
+              406: "the number has blocked this sender", 407: "could not be routed to the network",
+              409: "rejected by do-not-disturb", 500: "their server errored", 501: "their gateway errored",
+              502: "rejected by the network"}
+
+
 async def _send_sms(user_id, kind, to, message) -> bool:
     s = get_settings()
     if not s.sms_ready or not to:
         await _record(user_id, "sms", kind, to or "-", None, "skipped", error="Africa's Talking not configured")
         return False
-    base = ("https://api.sandbox.africastalking.com" if s.at_username == "sandbox"
-            else "https://api.africastalking.com")
+    sandbox = s.at_username == "sandbox"
+    base = "https://api.sandbox.africastalking.com" if sandbox else "https://api.africastalking.com"
     form = {"username": s.at_username, "to": to, "message": message}
-    if s.at_sender_id:
+    # the sandbox has no sender IDs: it answers 2xx with nobody in the recipient list
+    # when given one, and the message simply vanishes, so it is left off there
+    if s.at_sender_id and not sandbox:
         form["from"] = s.at_sender_id
     try:
         async with httpx.AsyncClient(timeout=20) as c:
             r = await c.post(f"{base}/version1/messaging", data=form,
                              headers={"apiKey": s.at_api_key, "Accept": "application/json"})
+        if r.status_code in (401, 403):
+            raise RuntimeError(f"the {'sandbox' if sandbox else 'live'} host refused the API key (HTTP {r.status_code}); "
+                               "AT_USERNAME and AT_API_KEY must be from the same app")
         body = r.json() if r.content else {}
-        rec = ((body.get("SMSMessageData") or {}).get("Recipients") or [{}])[0]
-        if r.status_code >= 400 or str(rec.get("status", "")).lower() not in ("success", "sent"):
-            raise RuntimeError(f"Africa's Talking {r.status_code}: {rec.get('status') or r.text[:200]}")
+        data = body.get("SMSMessageData") or {}
+        rec = (data.get("Recipients") or [None])[0]
+        if not rec:                                  # nothing was even attempted
+            why = f'; the sender ID "{s.at_sender_id}" is probably not approved yet' if s.at_sender_id and not sandbox else ""
+            raise RuntimeError((data.get("Message") or f"HTTP {r.status_code}: nothing accepted") + why)
+        code = int(rec.get("statusCode") or 0)
+        if code not in AT_ACCEPTED:
+            raise RuntimeError(f"{AT_REASONS.get(code) or rec.get('status') or 'refused'} ({code or 'no code'})")
         await _record(user_id, "sms", kind, to, None, "sent", provider_id=rec.get("messageId"))
         return True
     except Exception as e:
         log.warning("sms %s to %s failed: %s", kind, to, e)
-        await _record(user_id, "sms", kind, to, None, "failed", error=str(e))
+        await _record(user_id, "sms", kind, to, None, "failed", error=str(e)[:300])
         return False
 
 

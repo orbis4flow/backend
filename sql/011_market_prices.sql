@@ -9,3 +9,4 @@ create table if not exists app.market_prices (
 
 alter table app.market_prices enable row level security;
 revoke all on app.market_prices from anon, authenticated;
+
