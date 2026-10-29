@@ -536,3 +536,22 @@ def test_vip_credit_text_names_obisflow(monkeypatch):
                        "obisflow: $500.00 credited to your VIP account. Balance $1,250.00. Ref CR-1.")
     assert "debited from" in sent[1][2] and "M-Pesa" not in sent[0][2]
 
+
+# ----------------------------------------------------------------- scan --
+def test_scan_always_answers_with_real_readings():
+    import random, time
+    from app.services import prices
+    now = time.time()
+    rng = random.Random(5)
+    for m in prices.MARKETS.values():
+        prices._backfill(m, m.base, now, rng)
+        prices._series[m.sym].alive_since = now - 900
+    r = client.get("/signals?limit=6")
+    assert r.status_code == 200
+    rows = r.json()
+    assert len(rows) == 6
+    assert rows == sorted(rows, key=lambda x: x["strength"], reverse=True)
+    for x in rows:
+        assert x["dir"] in ("Rise", "Fall") and 1 <= x["strength"] <= 99
+        assert x["sym"] in prices.MARKETS and "15-minute average" in x["why"]
+
