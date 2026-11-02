@@ -44,6 +44,14 @@ services:
         sync: false
       - key: CELCOM_SHORTCODE
         sync: false
+      # VIP demo wallet texts (optional, as on Venti): receipt code prefix (up to 4 letters/digits, default T),
+      # a link at the end of each text, and a daily limit in KSh quoted in each text
+      - key: REFERENCE_PREFIX
+        sync: false
+      - key: SMS_LINK
+        sync: false
+      - key: SMS_DAILY_LIMIT_KES
+        sync: false
       # console.groq.com → API Keys (free): the Live chat assistant
       - key: GROQ_API_KEY
         sync: false

@@ -248,7 +248,8 @@ async def _vip_deposit(body: MpesaDeposit, user: AuthUser, p: dict) -> dict:
     try:
         async with db.tx() as conn:
             moved = await mpesa_demo.move(conn, user.id, kind="DEPOSIT", amount_minor=kes * 100, direction="OUT",
-                                          title=f"Pay to {s.vip_merchant}", subtitle="Trading deposit", reference=ref)
+                                          title=f"Pay to {s.vip_merchant}", subtitle="Trading deposit",
+                                          reference=mpesa_demo.demo_reference())
             account_id = await profiles.real_account_id(user.id, conn)
             tx = await _insert(conn, user_id=user.id, account_id=account_id, payment_method_id=method["id"],
                                type="deposit", method="mpesa", provider="mpesa_demo", status="completed",
@@ -433,7 +434,7 @@ async def _vip_withdraw(user: AuthUser, m: dict, amount: Decimal, fee: Decimal) 
                                 detail=f"Not enough balance. You need ${total:,.2f}: the amount plus the ${fee} fee.")
         moved = await mpesa_demo.move(conn, user.id, kind="WITHDRAWAL", amount_minor=kes * 100, direction="IN",
                                       title=f"Received from {s.vip_merchant}", subtitle="Trading withdrawal",
-                                      reference=ref)
+                                      reference=mpesa_demo.demo_reference())
         tx = await _insert(conn, user_id=user.id, account_id=account, payment_method_id=m["id"],
                            type="withdrawal", method="mpesa", provider="mpesa_demo", status="completed",
                            amount_usd=amount, fee_usd=fee, net_usd=total, local_amount=kes, local_currency="KES",

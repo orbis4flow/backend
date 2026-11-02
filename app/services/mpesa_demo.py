@@ -13,8 +13,8 @@ floors at zero; money in repays what is owed before it reaches the balance.
 
 Amounts are KES minor units (cents) throughout, as the handset counts them.
 """
-import hashlib
 import logging
+import re
 import secrets
 import uuid
 from datetime import datetime, timezone
@@ -49,10 +49,21 @@ def insufficient() -> RailError:
     return RailError(400, "insufficient_funds", "There is not enough money in that M-Pesa account.")
 
 
+REFERENCE_LENGTH = 10
+
+
+def reference_prefix() -> str:
+    """REFERENCE_PREFIX, up to 4 letters or digits, uppercased; "T" when unset
+    (as on Venti). Changing it changes new codes only."""
+    p = re.sub(r"[^A-Z0-9]", "", (get_settings().reference_prefix or "").upper())[:4]
+    return p or "T"
+
+
 def demo_reference() -> str:
-    """Safaricom's shape: three letters, then seven letters or digits."""
-    a, an = "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    return "".join(secrets.choice(a) for _ in range(3)) + "".join(secrets.choice(an) for _ in range(7))
+    """A ten character receipt code: the prefix, then random letters and digits."""
+    chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    out = reference_prefix()
+    return out + "".join(secrets.choice(chars) for _ in range(REFERENCE_LENGTH - len(out)))
 
 
 def kes_minor(kes: int | float) -> int:
@@ -222,43 +233,44 @@ def _stamp(at: str | None) -> str:
     return f"{t.day}/{t.month}/{t.strftime('%y')} at {hour}:{t.minute:02d} {'AM' if t.hour < 12 else 'PM'}"
 
 
-def _receipt(tx: dict) -> str:
-    """The same movement always gets the same receipt code."""
-    seed = str(tx.get("reference") or tx.get("id") or tx.get("at"))
-    return "U" + hashlib.sha1(seed.encode()).hexdigest()[:10].upper()
-
-
-def _masked(phone: str | None) -> str:
-    d = "".join(ch for ch in (phone or "") if ch.isdigit())
-    if len(d) < 9:
-        return ""
-    local = "0" + d[3:] if d.startswith("254") else d
-    return local[:3] + "****" + local[-3:]
+def _tail() -> str:
+    """The optional end every text shares, from Render: the daily limit, then the link."""
+    s = get_settings()
+    limit = f" Demo wallet daily limit is {_kes(int(round(s.sms_daily_limit_kes * 100)))}." \
+        if s.sms_daily_limit_kes > 0 else ""
+    link = (s.sms_link or "").strip()
+    return limit + (f" {s.vip_merchant}: {link}" if link else "")
 
 
 def message_for(tx: dict, wallet: dict, fuliza_used_minor: int = 0) -> str:
-    """The confirmation text for one movement. It names obisflow and the demo
-    wallet, never Safaricom, so a text that reaches a phone is always ours."""
+    """The confirmation text for one movement, laid out like Venti's (receipt
+    code, amount, who, account, date and time, balance, transaction cost, then
+    the daily limit and link set on Render). It names obisflow and the demo
+    wallet, never Safaricom or M-PESA, so a text that reaches a phone is
+    always plainly ours."""
     merchant = get_settings().vip_merchant
-    ref, when = _receipt(tx), _stamp(tx.get("at"))
+    ref, when = tx.get("reference") or demo_reference(), _stamp(tx.get("at"))
     amount, balance = _kes(tx["amountMinor"]), _kes(tx["balanceAfterMinor"])
     owed = f" Fuliza outstanding is {_kes(fuliza_used_minor)}." if fuliza_used_minor > 0 else ""
-    number = _masked(wallet.get("phone"))
+    phone = "".join(ch for ch in (wallet.get("phone") or "") if ch.isdigit())
     other = (tx.get("subtitle") or "").strip()
-    bal = f"Demo wallet balance is {balance}.{owed}"
+    bal = f"New demo wallet balance is {balance}.{owed}"
+    tail = _tail()
     kind = tx["kind"]
     if kind == "DEPOSIT":
-        return f"{ref} Confirmed. {amount} sent to {merchant}{' from ' + number if number else ''} on {when}. {bal}"
+        return (f"{ref} Confirmed. {amount} sent to {merchant}{' for account ' + phone if phone else ''} on {when}. "
+                f"{bal} Transaction cost, Ksh0.00.{tail}")
     if kind == "WITHDRAWAL":
-        return f"{ref} Confirmed. You have received {amount} from {merchant} on {when}. {bal}"
+        return f"{ref} Confirmed. You have received {amount} from {merchant} on {when}. {bal}{tail}"
     if kind == "RECEIVE":
-        return f"{ref} Confirmed. You have received {amount} from {other or 'a sender'} on {when}. {bal}"
+        return f"{ref} Confirmed. You have received {amount} from {other or 'a sender'} on {when}. {bal}{tail}"
     if kind == "AGENT_WITHDRAWAL":
-        return f"{ref} Confirmed. You have withdrawn {amount} at {other or 'an agent'} on {when}. {bal}"
+        return (f"{ref} Confirmed. You have withdrawn {amount} at {other or 'an agent'} on {when}. {bal} "
+                f"Transaction cost, Ksh0.00.{tail}")
     if kind == "REVERSAL":
         return (f"{ref} Reversed. Your payment of {amount} to {merchant} could not be completed and is back "
-                f"on your demo wallet on {when}. {bal}")
-    return f"{ref} Confirmed. {amount} moved on your demo wallet on {when}. {bal}"
+                f"on your demo wallet on {when}. {bal}{tail}")
+    return f"{ref} Confirmed. {amount} moved on your demo wallet on {when}. {bal}{tail}"
 
 
 def test_message(name: str | None) -> str:

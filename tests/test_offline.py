@@ -618,16 +618,36 @@ def test_handset_answers_in_the_clone_apps_shape():
     assert r.status_code == 422 and r.json()["error"]["message"] == "Enter the four digit PIN."
 
 
-def test_demo_receipts_name_obisflow_not_safaricom():
+def test_demo_receipts_are_laid_out_like_ventis(monkeypatch):
+    from app.config import get_settings
     from app.services import mpesa_demo as demo
-    tx = {"kind": "DEPOSIT", "amountMinor": -129500, "balanceAfterMinor": 1000000, "reference": "DP-1",
+    s = get_settings()
+    monkeypatch.setattr(s, "sms_link", "")
+    monkeypatch.setattr(s, "sms_daily_limit_kes", 0)
+    tx = {"kind": "DEPOSIT", "amountMinor": -129500, "balanceAfterMinor": 1000000, "reference": "TK3M9QX2LA",
           "subtitle": "Trading deposit", "at": "2026-11-02T12:15:00+00:00"}
     msg = demo.message_for(tx, {"phone": "254712345678"}, 0)
-    assert "Ksh1,295.00 sent to obisflow from 071****678 on 2/11/26 at 3:15 PM" in msg
-    assert "Demo wallet balance is Ksh10,000.00" in msg
+    assert msg == ("TK3M9QX2LA Confirmed. Ksh1,295.00 sent to OBISFLOW for account 254712345678 on 2/11/26 at "
+                   "3:15 PM. New demo wallet balance is Ksh10,000.00. Transaction cost, Ksh0.00.")
     assert "Safaricom" not in msg and "M-PESA" not in msg
-    assert demo.message_for(tx, {}, 0).split(" ")[0] == demo.message_for(tx, {}, 0).split(" ")[0]   # stable receipt
     assert "Fuliza outstanding is Ksh50.00" in demo.message_for({**tx, "kind": "WITHDRAWAL"}, {}, 5000)
+
+    monkeypatch.setattr(s, "sms_link", "https://obisflow.com")
+    monkeypatch.setattr(s, "sms_daily_limit_kes", 489800)
+    msg = demo.message_for({**tx, "kind": "WITHDRAWAL"}, {}, 0)
+    assert msg.endswith("Demo wallet daily limit is Ksh489,800.00. OBISFLOW: https://obisflow.com")
+
+
+def test_reference_prefix_comes_from_render(monkeypatch):
+    from app.config import get_settings
+    from app.services import mpesa_demo as demo
+    s = get_settings()
+    monkeypatch.setattr(s, "reference_prefix", "")
+    r = demo.demo_reference()
+    assert r.startswith("T") and len(r) == 10 and r.isalnum()
+    monkeypatch.setattr(s, "reference_prefix", " ob-1x9 ")
+    r = demo.demo_reference()
+    assert r.startswith("OB1X") and len(r) == 10
 
 
 def test_sms_gateway_prefers_celcom_unless_told_otherwise():
