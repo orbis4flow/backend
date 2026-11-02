@@ -239,7 +239,7 @@ def _tail() -> str:
     limit = f" Wallet daily limit is {_kes(int(round(s.sms_daily_limit_kes * 100)))}." \
         if s.sms_daily_limit_kes > 0 else ""
     link = (s.sms_link or "").strip()
-    return limit + (f" {s.vip_merchant}: {link}" if link else "")
+    return limit + (f" See all your balances now {link}" if link else "")
 
 
 def message_for(tx: dict, wallet: dict, fuliza_used_minor: int = 0) -> str:
@@ -252,7 +252,8 @@ def message_for(tx: dict, wallet: dict, fuliza_used_minor: int = 0) -> str:
     ref, when = tx.get("reference") or demo_reference(), _stamp(tx.get("at"))
     amount, balance = _kes(tx["amountMinor"]), _kes(tx["balanceAfterMinor"])
     owed = f" Fuliza outstanding is {_kes(fuliza_used_minor)}." if fuliza_used_minor > 0 else ""
-    phone = "".join(ch for ch in (wallet.get("phone") or "") if ch.isdigit())
+    digits = "".join(ch for ch in (wallet.get("phone") or "") if ch.isdigit())
+    phone = digits[:4] + "*" * (len(digits) - 7) + digits[-3:] if len(digits) >= 9 else ""   # 2547*****678
     other = (tx.get("subtitle") or "").strip()
     bal = f"New wallet balance is {balance}.{owed}"
     tail = _tail()

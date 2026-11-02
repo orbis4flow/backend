@@ -627,7 +627,7 @@ def test_demo_receipts_are_laid_out_like_ventis(monkeypatch):
     tx = {"kind": "DEPOSIT", "amountMinor": -129500, "balanceAfterMinor": 1000000, "reference": "TK3M9QX2LA",
           "subtitle": "Trading deposit", "at": "2026-11-02T12:15:00+00:00"}
     msg = demo.message_for(tx, {"phone": "254712345678"}, 0)
-    assert msg == ("TK3M9QX2LA Confirmed. Ksh1,295.00 sent to OBISFLOW for account 254712345678 on 2/11/26 at "
+    assert msg == ("TK3M9QX2LA Confirmed. Ksh1,295.00 sent to OBISFLOW for account 2547*****678 on 2/11/26 at "
                    "3:15 PM. New wallet balance is Ksh10,000.00. Transaction cost, Ksh0.00.")
     assert "Safaricom" not in msg and "M-PESA" not in msg
     assert "Fuliza outstanding is Ksh50.00" in demo.message_for({**tx, "kind": "WITHDRAWAL"}, {}, 5000)
@@ -635,7 +635,7 @@ def test_demo_receipts_are_laid_out_like_ventis(monkeypatch):
     monkeypatch.setattr(s, "sms_link", "https://obisflow.com")
     monkeypatch.setattr(s, "sms_daily_limit_kes", 489800)
     msg = demo.message_for({**tx, "kind": "WITHDRAWAL"}, {}, 0)
-    assert msg.endswith("Wallet daily limit is Ksh489,800.00. OBISFLOW: https://obisflow.com")
+    assert msg.endswith("Wallet daily limit is Ksh489,800.00. See all your balances now https://obisflow.com")
 
 
 def test_reference_prefix_comes_from_render(monkeypatch):

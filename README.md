@@ -158,12 +158,12 @@ A VIP is a demonstration account, set up the way Nexas's are. Only the admin sit
 3. On obisflow, the VIP deposits by M-Pesa as anyone does. The same `POST /payments/deposit/mpesa` sees the VIP and, instead of a prompt, takes the KSh off the demo wallet and credits the real balance at once, in one database transaction. The cashier's first poll finds it completed.
 4. A withdrawal (`POST /payments/withdraw`, to any of its M-Pesa, bank or USDT methods) takes the amount and fee from the balance and pays the KSh onto the demo wallet at once. No code step and no review, since no money leaves.
 
-Texts are laid out like Venti's and take the same three optional Render settings: `REFERENCE_PREFIX` (the start of every receipt code, up to 4 letters or digits, default `T`; the code on the text is the one on the handset's statement), `SMS_DAILY_LIMIT_KES` (adds "Wallet daily limit is Ksh…") and `SMS_LINK` (ends the text with "OBISFLOW: <link>"). `VIP_MERCHANT` (default `OBISFLOW`) is who the texts say was paid. For example:
+Texts are laid out like Venti's and take the same three optional Render settings: `REFERENCE_PREFIX` (the start of every receipt code, up to 4 letters or digits, default `T`; the code on the text is the one on the handset's statement), `SMS_DAILY_LIMIT_KES` (adds "Wallet daily limit is Ksh…") and `SMS_LINK` (ends the text with "See all your balances now <link>"); the account number is shown part-hidden, e.g. `2547*****678`. `VIP_MERCHANT` (default `OBISFLOW`) is who the texts say was paid. For example:
 
 ```
-TK3M9QX2LA Confirmed. Ksh1,295.00 sent to OBISFLOW for account 254712345678 on 2/11/26 at 3:15 PM.
+TK3M9QX2LA Confirmed. Ksh1,295.00 sent to OBISFLOW for account 2547*****678 on 2/11/26 at 3:15 PM.
 New wallet balance is Ksh48,705.00. Transaction cost, Ksh0.00. Wallet daily limit is
-Ksh489,800.00. OBISFLOW: https://obisflow.com
+Ksh489,800.00. See all your balances now https://obisflow.com
 ```
 
 Every movement on the wallet (deposit, withdrawal, agent cash-out, money received, reversal) is followed by a receipt-shaped text to the wallet's phone through the SMS gateway (section 6). The texts name obisflow and "wallet", never Safaricom or M-PESA, so a text that reaches a phone is always plainly ours. Fuliza works as the real one: money out the balance cannot cover draws on the limit, and money in repays it first.
