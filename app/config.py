@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     sms_provider: str = "auto"                     # auto (Celcom first), celcom or africastalking
 
     # ----------------------------------------------- VIP M-Pesa demo rail ---
+    staged_win_pct: float = 90.0                   # how often a VIP with staged results on wins (sql/014)
     vip_merchant: str = "OBISFLOW"                 # who the handset's receipts say was paid
     reference_prefix: str = ""                     # start of every demo receipt code, up to 4 letters/digits (as Venti)
     sms_link: str = ""                             # optional link at the end of every demo wallet text

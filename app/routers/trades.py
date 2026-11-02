@@ -10,6 +10,11 @@ entry is the last price when the contract is placed, the exit the last price
 at or before expiry, and the payout is the market's, never the client's. A
 contract the feed cannot price (the API restarted while it was open) is
 refunded.
+
+A VIP with staged results switched on from the admin site (sql/014) has its
+contracts settled in its favour STAGED_WIN_PCT of the time instead, with the
+feed's exit price still recorded. Those contracts are marked staged, and the
+account's screens carry a DEMO tag while the switch is on.
 """
 import asyncio
 import secrets
@@ -73,6 +78,7 @@ def public(t: dict, balance: Decimal | None = None) -> dict:
         "id": t["ref"], "sym": t["symbol"], "dir": t["direction"],
         "stake": float(t["stake"]), "payout": float(t["payout_pct"]),
         "entry": _num(t["entry_price"]), "exit": _num(t["exit_price"]),
+        "staged": bool(t.get("staged")),
         "status": t["status"], "result": t["status"] if t["status"] != "sold" else
                   ("won" if (t["profit"] or 0) >= 0 else "lost"),
         "priced": t.get("price_source", "client"),
@@ -102,6 +108,9 @@ async def _settle(conn, t: dict, *, exit_price: Decimal | None, by: str) -> tupl
         exit_price = _server_exit(t)
         if exit_price is None:
             status, by = "void", "void"
+        elif t.get("staged"):                            # staged results, labelled (sql/014)
+            won = secrets.randbelow(10_000) < int(get_settings().staged_win_pct * 100)
+            status, by = ("won" if won else "lost"), "staged"
         else:
             won = exit_price > t["entry_price"] if t["direction"] == "Rise" else exit_price < t["entry_price"]
             status = "won" if won else "lost"
@@ -165,7 +174,8 @@ async def _mine(conn, ref: str, user_id: str) -> dict:
 # ------------------------------------------------------------------ place --
 @router.post("/trades", status_code=201)
 async def place(body: Place, user: AuthUser = Depends(current_user)):
-    await profiles.for_user(user)
+    p = await profiles.for_user(user)
+    staged = bool(p.get("is_vip") and p.get("staged_results"))
     stake = usd(body.stake)
     if stake < MIN_STAKE or stake > MAX_STAKE:
         raise HTTPException(status_code=400, detail=f"Stake must be between ${MIN_STAKE} and ${MAX_STAKE:,}.")
@@ -205,6 +215,9 @@ async def place(body: Place, user: AuthUser = Depends(current_user)):
             ("OB-" + code(7), user.id, acct["id"], body.account, body.symbol.strip(), body.direction, stake,
              payout, body.duration_s, entry, source, opened, opened, body.duration_s))
         t = await cur.fetchone()
+        if staged:                                      # the column exists once sql/014 has run
+            cur = await conn.execute("update app.trades set staged = true where id = %s returning *", (t["id"],))
+            t = await cur.fetchone()
     return public(t, acct["balance"])
 
 

@@ -159,9 +159,7 @@ async def user(user_id: str, _: str = Depends(admin)):
                   destination, provider_receipt, failure_reason, created_at, completed_at
              from app.transactions where user_id = %s order by created_at desc limit 50""", (user_id,))
     trades = await db.many(
-        """select ref, account_kind, symbol, direction, stake, payout_pct, entry_price, exit_price, status,
-                  profit, opened_at, settled_at
-             from app.trades where user_id = %s order by opened_at desc limit 50""", (user_id,))
+        "select * from app.trades where user_id = %s order by opened_at desc limit 50", (user_id,))
     methods = await db.many(
         """select id, kind, label, masked, status, is_default, created_at, removed_at
              from app.payment_methods where user_id = %s order by created_at desc""", (user_id,))
@@ -177,6 +175,7 @@ async def user(user_id: str, _: str = Depends(admin)):
         "country": p["country_name"], "currency": p["currency"], "referralCode": p["referral_code"],
         "referredBy": ref["email"] if ref else None, "createdAt": _iso(p["created_at"]),
         "vip": bool(p.get("is_vip")), "vipSince": _iso(p.get("vip_since")),
+        "staged": bool(p.get("staged_results")),
         "balances": {a["kind"]: _f(a["balance"]) for a in accounts},
         "deposited": _f(summary["deposited"]), "withdrawn": _f(summary["withdrawn"]), "realPl": _f(real_pl["pl"]),
         "transactions": [_tx(t) for t in txs],
@@ -198,7 +197,7 @@ def _tx(t: dict) -> dict:
 
 
 def _trade(t: dict) -> dict:
-    return {"ref": t["ref"], "account": t["account_kind"], "symbol": t["symbol"], "direction": t["direction"],
+    return {"staged": bool(t.get("staged")), "ref": t["ref"], "account": t["account_kind"], "symbol": t["symbol"], "direction": t["direction"],
             "stake": _f(t["stake"]), "payout": _f(t["payout_pct"]),
             "entry": format(t["entry_price"].normalize(), "f") if t["entry_price"] is not None else None,
             "exit": format(t["exit_price"].normalize(), "f") if t["exit_price"] is not None else None,
@@ -339,6 +338,12 @@ async def set_vip(user_id: str, body: VipChange, ip: str = Depends(admin)):
         await conn.execute(
             "update app.profiles set is_vip = %s, vip_since = case when %s then now() end where id = %s",
             (body.vip, body.vip, user_id))
+        if not body.vip:                                # staged results go with VIP (sql/014)
+            try:
+                async with conn.transaction():
+                    await conn.execute("update app.profiles set staged_results = false where id = %s", (user_id,))
+            except Exception:                           # sql/014 not run yet
+                pass
         await _log("vip.grant" if body.vip else "vip.remove", user_id, user_id, note, ip, conn)
     return {"id": user_id, "vip": body.vip}
 
@@ -365,6 +370,26 @@ async def change_balance(user_id: str, body: BalanceChange, ip: str = Depends(ad
                    ip, conn)
     notify._later(notify.vip_balance(t, balance))
     return {"transaction": _tx(t), "real": _f(balance)}
+
+
+class StagedChange(BaseModel):
+    on: bool
+
+
+@router.post("/users/{user_id}/staged")
+async def set_staged(user_id: str, body: StagedChange, ip: str = Depends(admin)):
+    """Staged results for a VIP (sql/014): its contracts are settled in its
+    favour STAGED_WIN_PCT of the time. While on, the account's screens show a
+    DEMO tag and each contract is marked staged."""
+    p = await _profile(user_id)
+    if body.on and not p["is_vip"]:
+        raise HTTPException(status_code=403, detail="Staged results are only for VIP accounts. Make this user a VIP first.")
+    try:
+        await db.run("update app.profiles set staged_results = %s where id = %s", (body.on, user_id))
+    except Exception:
+        raise HTTPException(status_code=503, detail="Run sql/014_staged_results.sql first.")
+    await _log("staged.on" if body.on else "staged.off", user_id, user_id, None, ip)
+    return {"id": user_id, "staged": body.on}
 
 
 # ------------------------------------------------------- vip demo wallet --

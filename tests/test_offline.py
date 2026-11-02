@@ -701,3 +701,45 @@ def test_admin_wallet_routes_need_the_token(monkeypatch):
     assert client.post("/admin/users/abc/wallet", json={"pin": "1234"}).status_code == 401
     assert client.post("/admin/users/abc/wallet/test-sms", json={}).status_code == 401
     admin_router._misses.clear()
+
+
+def test_staged_contracts_win_at_the_set_rate_and_say_so(monkeypatch):
+    import asyncio
+    from datetime import datetime, timezone
+    from app.config import get_settings
+    from app.routers import trades
+
+    class Conn:
+        async def execute(self, sql, args=()):
+            class Cur:
+                async def fetchone(self_):
+                    if sql.lstrip().startswith("update app.trades"):
+                        return {**t, "status": args[0], "exit_price": args[1], "returned": args[2],
+                                "profit": args[3], "settled_by": args[4]}
+                    return {"balance": Decimal("100")}
+            return Cur()
+
+    now = datetime.now(timezone.utc)
+    t = {"id": 1, "ref": "OB-1", "symbol": "EUR/USD", "direction": "Rise", "stake": Decimal("10"),
+         "payout_pct": Decimal("80"), "entry_price": Decimal("1.1000"), "price_source": "server", "staged": True,
+         "account_id": "a", "account_kind": "real", "opened_at": now, "expires_at": now, "settled_at": now}
+    monkeypatch.setattr(trades, "_server_exit", lambda _t: Decimal("1.0990"))     # the price says: lost
+    monkeypatch.setattr(get_settings(), "staged_win_pct", 100.0)
+    row, _ = asyncio.run(trades._settle(Conn(), t, exit_price=None, by="price"))
+    assert row["status"] == "won" and row["settled_by"] == "staged" and row["exit_price"] == Decimal("1.0990")
+    assert trades.public(row)["staged"] is True
+    monkeypatch.setattr(get_settings(), "staged_win_pct", 0.0)
+    row, _ = asyncio.run(trades._settle(Conn(), t, exit_price=None, by="price"))
+    assert row["status"] == "lost"
+    row, _ = asyncio.run(trades._settle(Conn(), {**t, "staged": False}, exit_price=None, by="price"))
+    assert row["status"] == "lost" and row["settled_by"] == "price"
+
+
+def test_profile_shows_staged_only_for_a_vip():
+    from datetime import datetime, timezone
+    from app.services import profiles
+    base = {"id": "u", "email": "a@b.co", "full_name": "A", "phone": "", "country_code": None, "currency": "USD",
+            "referral_code": "ORBIS-AAAAA", "created_at": datetime.now(timezone.utc)}
+    assert profiles.public({**base, "is_vip": True, "staged_results": True})["staged"] is True
+    assert profiles.public({**base, "is_vip": False, "staged_results": True})["staged"] is False
+    assert profiles.public(base)["staged"] is False

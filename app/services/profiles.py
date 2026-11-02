@@ -92,6 +92,8 @@ def public(p: dict, account_id: str | None = None) -> dict:
         # "tier", not "vip": a VIP's cashier works exactly like anyone's (the M-Pesa
         # endpoints settle it against the demo wallet), so the UI treats it the same
         "tier": "vip" if p.get("is_vip") else "standard",
+        # staged results on (sql/014): the UI shows a DEMO tag while it is
+        "staged": bool(p.get("is_vip") and p.get("staged_results")),
         "createdAt": p["created_at"].isoformat(),
     }
 

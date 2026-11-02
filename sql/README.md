@@ -15,6 +15,7 @@ The backend does not create or change tables on its own. You run these files by 
 | `007_status.sql` | Uptime checks for the status page, one row per service every five minutes. |
 | `012_vip.sql` | VIP (demonstration) accounts. |
 | `013_vip_mpesa.sql` | The VIP M-Pesa demo rail: the demo wallets the M-Pesa clone app shows, and their statements. |
+| `014_staged_results.sql` | Staged results for VIP accounts (always shown with a DEMO tag). |
 | `admin/check_setup.sql` | Confirms both ran. Every row should read `ok`. |
 
 Both setup files are safe to run again.

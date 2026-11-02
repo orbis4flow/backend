@@ -180,6 +180,8 @@ The handset's routes are Nexas's, with the same answers, so the clone app's Novi
 
 Amounts on the handset are KSh cents. The admin site's wallet routes are `GET/POST /admin/users/{id}/wallet`, and `POST …/wallet/reset`, `…/wallet/test-sms`, `…/wallet/clear`. The PIN is stored in plain text on purpose: an admin assigns it, so it is nobody's real M-Pesa PIN, and the admin site shows it back. It guards a prop balance and nothing else. The admin site can still credit or debit a VIP's real balance directly.
 
+**Staged results** (needs `sql/014_staged_results.sql`). A VIP's page on the admin site has **Stage results**: with it on, that account's contracts settle in its favour `STAGED_WIN_PCT` of the time (default 90) instead of by the price at expiry, though the feed's exit price is still recorded. It is always visible: the account's balance card shows a **DEMO** tag on the trade, markets and positions pages, every contract settled this way carries DEMO in its history and confirmations and **Staged** on the admin site, and `settled_by` is `staged`. Only a VIP can have it on (a check constraint), and removing VIP turns it off.
+
 ## Money rules
 
 | Rule | |
