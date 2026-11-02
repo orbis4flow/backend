@@ -236,7 +236,7 @@ def _stamp(at: str | None) -> str:
 def _tail() -> str:
     """The optional end every text shares, from Render: the daily limit, then the link."""
     s = get_settings()
-    limit = f" Demo wallet daily limit is {_kes(int(round(s.sms_daily_limit_kes * 100)))}." \
+    limit = f" Wallet daily limit is {_kes(int(round(s.sms_daily_limit_kes * 100)))}." \
         if s.sms_daily_limit_kes > 0 else ""
     link = (s.sms_link or "").strip()
     return limit + (f" {s.vip_merchant}: {link}" if link else "")
@@ -245,7 +245,7 @@ def _tail() -> str:
 def message_for(tx: dict, wallet: dict, fuliza_used_minor: int = 0) -> str:
     """The confirmation text for one movement, laid out like Venti's (receipt
     code, amount, who, account, date and time, balance, transaction cost, then
-    the daily limit and link set on Render). It names obisflow and the demo
+    the daily limit and link set on Render). It names obisflow and its
     wallet, never Safaricom or M-PESA, so a text that reaches a phone is
     always plainly ours."""
     merchant = get_settings().vip_merchant
@@ -254,7 +254,7 @@ def message_for(tx: dict, wallet: dict, fuliza_used_minor: int = 0) -> str:
     owed = f" Fuliza outstanding is {_kes(fuliza_used_minor)}." if fuliza_used_minor > 0 else ""
     phone = "".join(ch for ch in (wallet.get("phone") or "") if ch.isdigit())
     other = (tx.get("subtitle") or "").strip()
-    bal = f"New demo wallet balance is {balance}.{owed}"
+    bal = f"New wallet balance is {balance}.{owed}"
     tail = _tail()
     kind = tx["kind"]
     if kind == "DEPOSIT":
@@ -269,14 +269,14 @@ def message_for(tx: dict, wallet: dict, fuliza_used_minor: int = 0) -> str:
                 f"Transaction cost, Ksh0.00.{tail}")
     if kind == "REVERSAL":
         return (f"{ref} Reversed. Your payment of {amount} to {merchant} could not be completed and is back "
-                f"on your demo wallet on {when}. {bal}{tail}")
-    return f"{ref} Confirmed. {amount} moved on your demo wallet on {when}. {bal}{tail}"
+                f"on your wallet on {when}. {bal}{tail}")
+    return f"{ref} Confirmed. {amount} moved on your wallet on {when}. {bal}{tail}"
 
 
 def test_message(name: str | None) -> str:
     first = (name or "").strip().split(" ")[0] or "Customer"
     merchant = get_settings().vip_merchant
-    return f"{merchant} demo wallet test. Dear {first}, your demo wallet texts are set up and will arrive on this number."
+    return f"{merchant} wallet test. Dear {first}, your wallet texts are set up and will arrive on this number."
 
 
 def notify_moved(moved: dict) -> None:
