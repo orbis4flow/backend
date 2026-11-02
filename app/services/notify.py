@@ -1,11 +1,10 @@
-"""Email (Resend) and SMS (Africa's Talking).
+"""Email (Resend) and SMS (Celcom or Africa's Talking, services/sms.py).
 
 Everything here is sent in the background: a slow or failing provider must
 never slow down or fail the request that caused the message. Each attempt,
 sent, failed or skipped for want of a key, is written to app.notifications.
 
   Resend:           https://resend.com/docs/api-reference/emails/send-email
-  Africa's Talking: https://developers.africastalking.com/docs/sms/sending
 """
 import asyncio
 import html
@@ -101,49 +100,22 @@ def email(user_id, kind: str, to: str, subject: str, title: str, lines: list[str
 
 
 # --------------------------------------------------------------------- SMS --
-# 100 processed, 101 sent, 102 queued: all three mean Africa's Talking has it
-AT_ACCEPTED = {100, 101, 102}
-AT_REASONS = {401: "held for risk review", 402: "that sender ID is not registered", 403: "not a valid phone number",
-              404: "that kind of number is not supported", 405: "not enough credit on the Africa's Talking account",
-              406: "the number has blocked this sender", 407: "could not be routed to the network",
-              409: "rejected by do-not-disturb", 500: "their server errored", 501: "their gateway errored",
-              502: "rejected by the network"}
-
-
 async def _send_sms(user_id, kind, to, message) -> bool:
-    s = get_settings()
-    if not s.sms_ready or not to:
-        await _record(user_id, "sms", kind, to or "-", None, "skipped", error="Africa's Talking not configured")
+    """Through whichever gateway is set up (services/sms.py), recorded either way."""
+    from . import sms as gateway
+    if not to:
+        await _record(user_id, "sms", kind, "-", None, "skipped", error="no phone number")
         return False
-    sandbox = s.at_username == "sandbox"
-    base = "https://api.sandbox.africastalking.com" if sandbox else "https://api.africastalking.com"
-    form = {"username": s.at_username, "to": to, "message": message}
-    # the sandbox has no sender IDs: it answers 2xx with nobody in the recipient list
-    # when given one, and the message simply vanishes, so it is left off there
-    if s.at_sender_id and not sandbox:
-        form["from"] = s.at_sender_id
-    try:
-        async with httpx.AsyncClient(timeout=20) as c:
-            r = await c.post(f"{base}/version1/messaging", data=form,
-                             headers={"apiKey": s.at_api_key, "Accept": "application/json"})
-        if r.status_code in (401, 403):
-            raise RuntimeError(f"the {'sandbox' if sandbox else 'live'} host refused the API key (HTTP {r.status_code}); "
-                               "AT_USERNAME and AT_API_KEY must be from the same app")
-        body = r.json() if r.content else {}
-        data = body.get("SMSMessageData") or {}
-        rec = (data.get("Recipients") or [None])[0]
-        if not rec:                                  # nothing was even attempted
-            why = f'; the sender ID "{s.at_sender_id}" is probably not approved yet' if s.at_sender_id and not sandbox else ""
-            raise RuntimeError((data.get("Message") or f"HTTP {r.status_code}: nothing accepted") + why)
-        code = int(rec.get("statusCode") or 0)
-        if code not in AT_ACCEPTED:
-            raise RuntimeError(f"{AT_REASONS.get(code) or rec.get('status') or 'refused'} ({code or 'no code'})")
-        await _record(user_id, "sms", kind, to, None, "sent", provider_id=rec.get("messageId"))
+    out = await gateway.send(to, message)
+    if out["status"] == "off":
+        await _record(user_id, "sms", kind, to, None, "skipped", error="no SMS gateway configured")
+        return False
+    if out["ok"]:
+        await _record(user_id, "sms", kind, to, None, "sent", provider_id=out.get("message_id"))
         return True
-    except Exception as e:
-        log.warning("sms %s to %s failed: %s", kind, to, e)
-        await _record(user_id, "sms", kind, to, None, "failed", error=str(e)[:300])
-        return False
+    log.warning("sms %s to %s failed (%s): %s", kind, to, out.get("provider"), out["detail"])
+    await _record(user_id, "sms", kind, to, None, "failed", error=f"{out.get('provider')}: {out['detail']}"[:300])
+    return False
 
 
 def sms(user_id, kind: str, to: str | None, message: str) -> None:

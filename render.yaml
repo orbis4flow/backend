@@ -37,6 +37,13 @@ services:
         sync: false
       - key: AT_SENDER_ID
         sync: false
+      # Celcom Africa → Developers / API (optional): when all three are set, texts go through Celcom instead
+      - key: CELCOM_API_KEY
+        sync: false
+      - key: CELCOM_PARTNER_ID
+        sync: false
+      - key: CELCOM_SHORTCODE
+        sync: false
       # console.groq.com → API Keys (free): the Live chat assistant
       - key: GROQ_API_KEY
         sync: false

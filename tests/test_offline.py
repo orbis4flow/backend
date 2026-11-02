@@ -555,3 +555,129 @@ def test_scan_always_answers_with_real_readings():
         assert x["dir"] in ("Rise", "Fall") and 1 <= x["strength"] <= 99
         assert x["sym"] in prices.MARKETS and "15-minute average" in x["why"]
 
+
+
+# ------------------------------------------------------- vip m-pesa rail --
+class _FakeConn:
+    """Just enough of a connection for mpesa_demo.move: one wallet row."""
+
+    def __init__(self, balance, limit=0, used=0):
+        self.w = {"balance_minor": balance, "fuliza_limit_minor": limit, "fuliza_used_minor": used}
+        self.inserted = None
+
+    async def execute(self, sql, args=()):
+        conn = self
+
+        class Cur:
+            async def fetchone(self):
+                if sql.lstrip().startswith("select"):
+                    return dict(conn.w) if conn.w else None
+                if "insert into app.mpesa_demo_tx" in sql:
+                    from datetime import datetime, timezone
+                    conn.inserted = args
+                    return {"id": "t1", "kind": args[1], "title": args[2], "subtitle": args[3],
+                            "amount_minor": args[4], "balance_after_minor": args[5], "fuliza_after_minor": args[6],
+                            "reference": args[7], "created_at": datetime.now(timezone.utc)}
+
+        if sql.lstrip().startswith("update app.mpesa_demo_wallet"):
+            self.w.update(balance_minor=args[0], fuliza_used_minor=args[1])
+        return Cur()
+
+
+def test_demo_wallet_fuliza_works_like_the_real_one():
+    import asyncio
+    from app.services import mpesa_demo as demo
+    c = _FakeConn(balance=100_00, limit=500_00)
+    m = asyncio.run(demo.move(c, "u", kind="DEPOSIT", amount_minor=300_00, direction="OUT", title="Pay"))
+    assert (m["balanceMinor"], m["fulizaUsedMinor"]) == (0, 200_00)     # shortfall drawn from Fuliza
+    assert m["tx"]["amountMinor"] == -300_00
+    m = asyncio.run(demo.move(c, "u", kind="WITHDRAWAL", amount_minor=250_00, direction="IN", title="In"))
+    assert (m["balanceMinor"], m["fulizaUsedMinor"]) == (50_00, 0)      # money in repays Fuliza first
+    with pytest.raises(demo.RailError) as e:
+        asyncio.run(demo.move(c, "u", kind="DEPOSIT", amount_minor=600_00, direction="OUT", title="Pay"))
+    assert e.value.code == "insufficient_funds"
+
+
+def test_demo_wallet_without_a_wallet_is_refused():
+    import asyncio
+    from app.services import mpesa_demo as demo
+    c = _FakeConn(0)
+    c.w = None
+    with pytest.raises(demo.RailError) as e:
+        asyncio.run(demo.move(c, "u", kind="DEPOSIT", amount_minor=100, direction="OUT", title="x"))
+    assert e.value.code == "no_wallet" and e.value.status == 409
+
+
+def test_handset_answers_in_the_clone_apps_shape():
+    r = client.get("/mpesa/account")
+    assert r.status_code == 401 and r.json()["ok"] is False
+    assert r.json()["error"]["message"] == "This phone is not linked yet."
+    r = client.get("/mpesa/account", headers={"Authorization": "Bearer not-a-token"})
+    assert r.status_code == 401 and "Enter the PIN again" in r.json()["error"]["message"]
+    r = client.post("/mpesa/link", json={"pin": "12a4"})
+    assert r.status_code == 422 and r.json()["error"]["message"] == "Enter the four digit PIN."
+
+
+def test_demo_receipts_name_obisflow_not_safaricom():
+    from app.services import mpesa_demo as demo
+    tx = {"kind": "DEPOSIT", "amountMinor": -129500, "balanceAfterMinor": 1000000, "reference": "DP-1",
+          "subtitle": "Trading deposit", "at": "2026-11-02T12:15:00+00:00"}
+    msg = demo.message_for(tx, {"phone": "254712345678"}, 0)
+    assert "Ksh1,295.00 sent to obisflow from 071****678 on 2/11/26 at 3:15 PM" in msg
+    assert "Demo wallet balance is Ksh10,000.00" in msg
+    assert "Safaricom" not in msg and "M-PESA" not in msg
+    assert demo.message_for(tx, {}, 0).split(" ")[0] == demo.message_for(tx, {}, 0).split(" ")[0]   # stable receipt
+    assert "Fuliza outstanding is Ksh50.00" in demo.message_for({**tx, "kind": "WITHDRAWAL"}, {}, 5000)
+
+
+def test_sms_gateway_prefers_celcom_unless_told_otherwise():
+    from app.config import Settings
+    at = dict(at_username="app", at_api_key="k")
+    cel = dict(celcom_api_key="k", celcom_partner_id="1", celcom_shortcode="OBIS")
+    assert Settings(_env_file=None).sms_gateway is None
+    assert Settings(_env_file=None, **at).sms_gateway == "africastalking"
+    assert Settings(_env_file=None, **at, **cel).sms_gateway == "celcom"
+    assert Settings(_env_file=None, **at, **cel, sms_provider="africastalking").sms_gateway == "africastalking"
+    assert Settings(_env_file=None, **at, celcom_api_key="k").sms_gateway == "africastalking"   # half-set Celcom ignored
+
+
+def test_nexas_sms_variable_names_work(monkeypatch):
+    from app.config import Settings
+    monkeypatch.setenv("AFRICASTALKING_USERNAME", "sandbox")
+    monkeypatch.setenv("AFRICASTALKING_API_KEY", "atsk_x")
+    s = Settings(_env_file=None)
+    assert s.at_username == "sandbox" and s.at_ready
+
+
+def test_celcom_reply_is_read_with_either_spelling(monkeypatch):
+    import asyncio
+    import httpx
+    from app.config import get_settings
+    from app.services import sms
+    s = get_settings()
+    for k, v in dict(celcom_api_key="k", celcom_partner_id="1", celcom_shortcode="OBIS", sms_provider="auto").items():
+        monkeypatch.setattr(s, k, v)
+    replies = iter([{"responses": [{"response-code": 200, "response-description": "Success", "messageid": 9}]},
+                    {"responses": [{"respose-code": "1006", "respose-description": "Invalid credentials"}]}])
+
+    async def post(self, url, **kw):
+        assert url.endswith("/sendsms/") and kw["json"]["mobile"] == "254712345678"
+        return httpx.Response(200, json=next(replies))
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    ok = asyncio.run(sms.send("0712 345 678", "hi"))
+    assert ok["ok"] and ok["provider"] == "Celcom" and ok["message_id"] == 9
+    no = asyncio.run(sms.send("0712345678", "hi"))
+    assert no["status"] == "refused" and "Invalid credentials (1006)" in no["detail"]
+    assert asyncio.run(sms.send("12", "hi"))["status"] == "refused"
+
+
+def test_admin_wallet_routes_need_the_token(monkeypatch):
+    from app.config import get_settings
+    from app.routers import admin as admin_router
+    monkeypatch.setattr(get_settings(), "admin_token", "x" * 40)
+    admin_router._misses.clear()
+    assert client.get("/admin/users/abc/wallet").status_code == 401
+    assert client.post("/admin/users/abc/wallet", json={"pin": "1234"}).status_code == 401
+    assert client.post("/admin/users/abc/wallet/test-sms", json={}).status_code == 401
+    admin_router._misses.clear()

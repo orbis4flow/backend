@@ -91,7 +91,7 @@ Set the webhook URL in Paystack → Settings → API Keys & Webhooks: `https://<
 
 Dollar amounts are charged in `PAYSTACK_CURRENCY` (KES), converted at `USD_KES_RATE`. The card number never reaches obisflow. A card that pays successfully is saved as a verified payment method.
 
-## 6 · Email (Resend) and SMS (Africa's Talking)
+## 6 · Email (Resend) and SMS (Celcom or Africa's Talking)
 
 Optional: without keys the API still works and records each message as skipped in `app.notifications`.
 
@@ -102,6 +102,10 @@ Optional: without keys the API still works and records each message as skipped i
 | `SUPPORT_EMAIL` | where replies go; default `support@obisflow.com` |
 | `AT_USERNAME`, `AT_API_KEY` | africastalking.com → your live app → Settings → API Key, with credit on the account. `sandbox` as the username only reaches their online simulator, never a phone. |
 | `AT_SENDER_ID` | an approved alphanumeric sender ID (optional; without one Safaricom shows a shared short code) |
+| `CELCOM_API_KEY`, `CELCOM_PARTNER_ID`, `CELCOM_SHORTCODE` | Celcom Africa → Developers / API, all three together. The shortcode is the sender ID Celcom registered (never `MPESA`). |
+| `SMS_PROVIDER` | `auto` (default): Celcom when its three are set, else Africa's Talking. `celcom` or `africastalking` forces one. |
+
+As on Nexas: one gateway is used, never both for one message, and a half-set gateway is ignored. `AFRICASTALKING_USERNAME`, `AFRICASTALKING_API_KEY` and `AFRICASTALKING_SENDER_ID` (the Nexas names) work as well as the `AT_` ones. `/health` shows `sms_gateway` and `sms_sender`.
 
 Sent: a welcome email; deposit received (email and SMS); withdrawal requested (email and SMS); a new payment method (email); referral earnings paid (email and SMS). SMS goes to the phone number on the profile.
 
@@ -143,9 +147,30 @@ A withdrawal takes the amount plus the fee from the balance at once and waits in
 
 An M-Pesa prompt deposit still open 2 minutes after it started (`DEPOSIT_EXPIRE_S`, 120) is checked with the provider once more, credited if it was paid, and deleted if not. Card and Kora checkout deposits get 15 minutes (`CHECKOUT_EXPIRE_S`, 900), since they are paid on another site. USDT requests keep their own window. Each removal is logged as `deposit.expired`; a callback that arrives afterwards is kept in `webhook_events` as "unknown reference".
 
-## 13 · VIP accounts
+## 13 · VIP accounts and the M-Pesa demo rail
 
-A VIP is a demonstration account. Only the admin site makes one (a user's page → Make VIP), and only from an account with nothing in its real balance (any unfinished deposit is removed; a withdrawal in review stays, to pay or reject as usual). The admin site then credits or debits its real balance, and it trades real contracts with that money on the same prices as everyone. A VIP cannot deposit or withdraw, its trades earn its referrer nothing, and the overview's totals leave it out. Removing VIP takes the credited balance back to zero. Needs `sql/012_vip.sql`.
+A VIP is a demonstration account, set up the way Nexas's are. Only the admin site makes one (a user's page → Make VIP), and only from an account with nothing in its real balance (any unfinished deposit is removed; a withdrawal in review stays, to pay or reject as usual). It trades real contracts on the same prices as everyone, its trades earn its referrer nothing, and the overview's totals leave it out. Removing VIP takes its real balance back to zero. Needs `sql/012_vip.sql` and `sql/013_vip_mpesa.sql`.
+
+**Its money moves through the M-Pesa clone app** (the `mpesaclone` handset), not PayHero or Kora:
+
+1. Admin site → the user → **Make VIP**, then in **M-Pesa demo wallet** set a four digit PIN, the opening KSh balance, the Fuliza limit and the phone the texts go to. **Test SMS** sends one plain text to that phone and shows what the gateway said.
+2. In the clone app, point the rail at this API (`services/rails/obisflow.ts`, chosen in `services/config.ts`) and type that PIN once. It is exchanged for a device token the phone keeps.
+3. On obisflow, the VIP deposits by M-Pesa as anyone does. The same `POST /payments/deposit/mpesa` sees the VIP and, instead of a prompt, takes the KSh off the demo wallet and credits the real balance at once, in one database transaction. The cashier's first poll finds it completed.
+4. A withdrawal (`POST /payments/withdraw`, to any of its M-Pesa, bank or USDT methods) takes the amount and fee from the balance and pays the KSh onto the demo wallet at once. No code step and no review, since no money leaves.
+
+Every movement on the wallet (deposit, withdrawal, agent cash-out, money received, reversal) is followed by a receipt-shaped text to the wallet's phone through the SMS gateway (section 6). The texts name obisflow and the "demo wallet", never Safaricom or M-PESA, so a text that reaches a phone is always plainly ours. Fuliza works as the real one: money out the balance cannot cover draws on the limit, and money in repays it first.
+
+The handset's routes are Nexas's, with the same answers, so the clone app's Novi rail works here with only the address changed:
+
+| Method | Path | Auth |
+|---|---|---|
+| POST | `/mpesa/link` | `{pin}` → `{deviceToken, account}`. Wrong and unassigned PINs answer alike; 10 tries per 15 minutes |
+| GET | `/mpesa/account` | device token: balance, Fuliza and the last 60 movements |
+| POST | `/mpesa/agent-withdraw` | device token: `{amountMinor, agent?}` |
+| POST | `/mpesa/receive` | device token: `{amountMinor, from?}` |
+| POST | `/mpesa/reset` | device token: `{balanceMinor?}`, empty statement, nothing owed, still linked |
+
+Amounts on the handset are KSh cents. The admin site's wallet routes are `GET/POST /admin/users/{id}/wallet`, and `POST …/wallet/reset`, `…/wallet/test-sms`, `…/wallet/clear`. The PIN is stored in plain text on purpose: an admin assigns it, so it is nobody's real M-Pesa PIN, and the admin site shows it back. It guards a prop balance and nothing else. The admin site can still credit or debit a VIP's real balance directly.
 
 ## Money rules
 
@@ -209,7 +234,8 @@ All JSON. Signed-in routes take `Authorization: Bearer <access_token>`. Errors a
 | POST | `/sessions/revoke-others` | sign every other device out |
 | POST | `/webhooks/kora`, `/webhooks/payhero`, `/webhooks/paystack` | provider callbacks |
 | GET | `/health` | database and provider readiness |
-| GET, POST | `/admin/*` | the admin site's API (github.com/Deon62/adminobis); exists only with `ADMIN_TOKEN` set, needs `sql/009_admin.sql`, `sql/010_events.sql` for its Logs page, and `sql/012_vip.sql` |
+| GET, POST | `/admin/*` | the admin site's API (github.com/Deon62/adminobis); exists only with `ADMIN_TOKEN` set, needs `sql/009_admin.sql`, `sql/010_events.sql` for its Logs page, `sql/012_vip.sql` and `sql/013_vip_mpesa.sql` |
+| POST, GET | `/mpesa/*` | the M-Pesa clone handset (section 13), device token auth |
 | GET | `/prices` | the last price per market: `{sym: {p, t, live, dp, payout}}` |
 | GET | `/prices/history?symbol=&seconds=` | up to an hour of ticks, for the chart |
 | GET | `/prices/stream?symbol=` | every tick of one market, as server-sent events |

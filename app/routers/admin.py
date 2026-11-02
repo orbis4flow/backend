@@ -10,9 +10,10 @@ withdrawal, verifying or blocking a payment method, and VIP accounts (making
 one, crediting or debiting its real balance). Each is recorded in
 app.admin_actions (sql/009_admin.sql); withdrawal outcomes are emailed.
 
-VIP accounts (sql/012_vip.sql) are demonstration accounts whose real balance
-is only ever money credited here. They cannot deposit or withdraw, and the
-totals on the overview leave them out.
+VIP accounts (sql/012_vip.sql) are demonstration accounts. Their money moves
+by M-Pesa through a demo wallet (sql/013_vip_mpesa.sql) that the M-Pesa clone
+app shows, set up here (PIN, balance, Fuliza limit, phone), or is credited
+here directly. The totals on the overview leave them out.
 """
 import hmac
 import time
@@ -27,8 +28,8 @@ from pydantic import BaseModel, Field
 
 from .. import db
 from ..config import get_settings
-from ..services import notify, prices
-from ..util import reference, usd
+from ..services import mpesa_demo, notify, prices, sms
+from ..util import kenyan_msisdn, reference, usd
 
 router = APIRouter(prefix="/admin", tags=["admin"], include_in_schema=False)
 
@@ -364,6 +365,112 @@ async def change_balance(user_id: str, body: BalanceChange, ip: str = Depends(ad
                    ip, conn)
     notify._later(notify.vip_balance(t, balance))
     return {"transaction": _tx(t), "real": _f(balance)}
+
+
+# ------------------------------------------------------- vip demo wallet --
+class WalletChange(BaseModel):
+    pin: str | None = Field(default=None, pattern=r"^\d{4}$")
+    balance_kes: float | None = Field(default=None, ge=0, le=10_000_000)
+    fuliza_limit_kes: float | None = Field(default=None, ge=0, le=10_000_000)
+    name: str | None = Field(default=None, max_length=80)
+    phone: str | None = Field(default=None, max_length=20)
+
+
+class WalletReset(BaseModel):
+    balance_kes: float | None = Field(default=None, ge=0, le=10_000_000)
+
+
+class TestSms(BaseModel):
+    phone: str | None = Field(default=None, max_length=20)
+
+
+async def _profile(user_id: str) -> dict:
+    try:
+        p = await db.one("select id, email, full_name, phone, is_vip from app.profiles where id = %s", (user_id,))
+    except Exception:                                   # not a uuid
+        p = None
+    if not p:
+        raise HTTPException(status_code=404, detail="No such user.")
+    return p
+
+
+def _gateway() -> dict:
+    return {"provider": sms.provider(), "sender": sms.sender()}
+
+
+@router.get("/users/{user_id}/wallet")
+async def wallet(user_id: str, _: str = Depends(admin)):
+    """The VIP's M-Pesa demo wallet, its last 20 movements, and which SMS
+    gateway its texts go through. The PIN is returned whole: it is what the
+    tester types into the clone app, and it guards nothing real."""
+    await _profile(user_id)
+    w = await mpesa_demo.wallet_for(user_id)
+    return {"wallet": w, "statement": await mpesa_demo.statement(user_id, 20) if w else [], "sms": _gateway()}
+
+
+@router.post("/users/{user_id}/wallet")
+async def set_wallet(user_id: str, body: WalletChange, ip: str = Depends(admin)):
+    """Create the demo wallet (a PIN is needed then) or change any part of it.
+    The name and phone default to the profile's."""
+    p = await _profile(user_id)
+    if not p["is_vip"]:
+        raise HTTPException(status_code=403, detail="Only VIP accounts have a demo wallet. Make this user a VIP first.")
+    phone = None
+    if body.phone is not None and body.phone.strip():
+        phone = kenyan_msisdn(body.phone)
+        if not phone:
+            raise HTTPException(status_code=400, detail="Enter a Kenyan mobile number, e.g. 0712 345 678.")
+    elif not await mpesa_demo.wallet_for(user_id):
+        phone = kenyan_msisdn(p["phone"] or "")
+    w = await mpesa_demo.set_wallet(
+        user_id, pin=body.pin,
+        balance_minor=None if body.balance_kes is None else mpesa_demo.kes_minor(body.balance_kes),
+        fuliza_limit_minor=None if body.fuliza_limit_kes is None else mpesa_demo.kes_minor(body.fuliza_limit_kes),
+        name=(body.name or "").strip() or p["full_name"] or None, phone=phone)
+    # the PIN itself never goes in the log: a log of PINs is a list of keys to every wallet
+    bits = [k for k, v in (("PIN", body.pin), ("balance", body.balance_kes), ("Fuliza limit", body.fuliza_limit_kes),
+                           ("phone", phone)) if v is not None]
+    await _log("wallet.set", user_id, user_id, "changed " + (", ".join(bits) or "name"), ip)
+    return {"wallet": w, "statement": await mpesa_demo.statement(user_id, 20), "sms": _gateway()}
+
+
+@router.post("/users/{user_id}/wallet/reset")
+async def reset_wallet(user_id: str, body: WalletReset, ip: str = Depends(admin)):
+    """Between rehearsals: an empty statement and nothing owed, at the balance
+    given (or the current one). The handset stays linked."""
+    await _profile(user_id)
+    w = await mpesa_demo.reset(user_id, None if body.balance_kes is None else mpesa_demo.kes_minor(body.balance_kes))
+    await _log("wallet.reset", user_id, user_id, None if body.balance_kes is None else f"KSh {body.balance_kes:,.2f}", ip)
+    return {"wallet": w, "statement": [], "sms": _gateway()}
+
+
+@router.post("/users/{user_id}/wallet/test-sms")
+async def test_sms(user_id: str, body: TestSms, ip: str = Depends(admin)):
+    """One plainly worded text to the wallet's number, sent while you wait, so
+    the gateway, the sender and the number are known to work before a demo."""
+    await _profile(user_id)
+    if not get_settings().sms_ready:
+        raise HTTPException(status_code=400, detail="No SMS gateway is configured. Set CELCOM_API_KEY, CELCOM_PARTNER_ID "
+                                                    "and CELCOM_SHORTCODE, or AT_USERNAME and AT_API_KEY, on the API.")
+    w = await mpesa_demo.wallet_for(user_id)
+    if not w:
+        raise HTTPException(status_code=404, detail="This account has no demo wallet yet.")
+    to = (body.phone or "").strip() or w["phone"]
+    if not to:
+        raise HTTPException(status_code=400, detail="This wallet has no phone number. Add one first.")
+    out = await sms.send(to, mpesa_demo.test_message(w["holderName"]))
+    await _log("wallet.test_sms", user_id, user_id, f"{out['status']} via {out.get('provider')}: {out['detail']}"[:300], ip)
+    return {"ok": out["ok"], "status": out["status"], "detail": out["detail"], "provider": out.get("provider"),
+            "sender": sms.sender(), "to": to}
+
+
+@router.post("/users/{user_id}/wallet/clear")
+async def clear_wallet(user_id: str, ip: str = Depends(admin)):
+    """Remove the wallet and its statement. A handset linked to it is unlinked."""
+    await _profile(user_id)
+    await mpesa_demo.clear(user_id)
+    await _log("wallet.clear", user_id, user_id, None, ip)
+    return {"wallet": None, "statement": [], "sms": _gateway()}
 
 
 # --------------------------------------------------------- payment methods --

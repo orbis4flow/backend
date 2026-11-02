@@ -9,7 +9,8 @@ union all
 select 'table ' || t,
        case when to_regclass('app.' || t) is not null then 'ok' else 'MISSING' end
 from unnest(array['profiles', 'accounts', 'payment_methods', 'transactions', 'webhook_events', 'trades',
-                   'notifications', 'referral_earnings', 'preferences', 'otp_codes', 'sessions', 'status_checks']) as t
+                   'notifications', 'referral_earnings', 'preferences', 'otp_codes', 'sessions', 'status_checks',
+                   'mpesa_demo_wallet', 'mpesa_demo_tx']) as t
 union all
 select 'rls on ' || c.relname,
        case when c.relrowsecurity then 'ok' else 'OFF, run 002_security.sql' end

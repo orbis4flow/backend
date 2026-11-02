@@ -2,7 +2,7 @@
 import os
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -62,10 +62,20 @@ class Settings(BaseSettings):
     email_from: str = "obisflow <no-reply@obisflow.com>"   # a sender on a domain verified in Resend
     support_email: str = "support@obisflow.com"
 
-    # --------------------------------------------- SMS (Africa's Talking) ---
-    at_username: str = ""                          # "sandbox" while testing
-    at_api_key: str = ""
-    at_sender_id: str = ""                         # an approved sender ID; empty uses the shared one
+    # ------------------------------------- SMS (Celcom, Africa's Talking) ---
+    # Celcom is used when both are set (as on Nexas); SMS_PROVIDER forces one.
+    # The AFRICASTALKING_* names Nexas uses work too.
+    at_username: str = Field(default="", validation_alias=AliasChoices("at_username", "africastalking_username"))
+    at_api_key: str = Field(default="", validation_alias=AliasChoices("at_api_key", "africastalking_api_key"))
+    at_sender_id: str = Field(default="", validation_alias=AliasChoices("at_sender_id", "africastalking_sender_id"))
+    celcom_api_key: str = ""
+    celcom_partner_id: str = ""
+    celcom_shortcode: str = ""                     # the sender ID Celcom registered; never MPESA
+    celcom_base_url: str = "https://isms.celcomafrica.com/api/services"
+    sms_provider: str = "auto"                     # auto (Celcom first), celcom or africastalking
+
+    # ----------------------------------------------- VIP M-Pesa demo rail ---
+    vip_merchant: str = "obisflow"                 # who the handset's receipts say was paid
 
     # ----------------------------------------------- market data (free) ---
     finnhub_api_key: str = ""                      # free key from finnhub.io, for market news
@@ -126,8 +136,29 @@ class Settings(BaseSettings):
         return bool(self.resend_api_key)
 
     @property
-    def sms_ready(self) -> bool:
+    def at_ready(self) -> bool:
         return bool(self.at_username and self.at_api_key)
+
+    @property
+    def celcom_ready(self) -> bool:
+        return bool(self.celcom_api_key and self.celcom_partner_id and self.celcom_shortcode)
+
+    @property
+    def sms_gateway(self) -> str | None:
+        """Which gateway texts go through: SMS_PROVIDER when that one is set up,
+        else Celcom, else Africa's Talking; None when neither is."""
+        want = self.sms_provider.strip().lower()
+        if want == "africastalking" and self.at_ready:
+            return "africastalking"
+        if want == "celcom" and self.celcom_ready:
+            return "celcom"
+        if self.celcom_ready:
+            return "celcom"
+        return "africastalking" if self.at_ready else None
+
+    @property
+    def sms_ready(self) -> bool:
+        return self.sms_gateway is not None
 
 
 @lru_cache

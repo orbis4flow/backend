@@ -8,6 +8,12 @@ refunds) with sql/admin/withdrawals.sql.
 
 Limits: deposits from MIN_DEPOSIT_USD, withdrawals from MIN_WITHDRAW_USD
 with WITHDRAW_FEE_USD charged on top of the amount.
+
+VIP accounts (sql/013_vip_mpesa.sql) use the same two M-Pesa endpoints, and
+the cashier cannot tell the difference: the deposit comes off the M-Pesa demo
+wallet the clone app shows and is credited at once, and a withdrawal is paid
+onto that wallet at once. Which rail is decided here, from the profile, never
+by the browser. Cards and USDT stay closed to VIPs.
 """
 import logging
 import time
@@ -23,7 +29,7 @@ from ..config import get_settings
 from ..security import AuthUser, current_user
 from psycopg.errors import UniqueViolation
 
-from ..services import events, kora, ledger, limits, notify, otp, payhero, paystack, profiles, settle, tron
+from ..services import events, kora, ledger, limits, mpesa_demo, notify, otp, payhero, paystack, profiles, settle, tron
 from ..util import kenyan_msisdn, kes_down, kes_up, mask_phone, reference, show_date, usd
 from .payment_methods import upsert_mpesa
 
@@ -115,27 +121,31 @@ async def rates():
 
 
 # ------------------------------------------------------------------ M-Pesa --
-@router.post("/payments/deposit/mpesa", status_code=201)
-async def deposit_mpesa(body: MpesaDeposit, user: AuthUser = Depends(current_user)):
-    s = get_settings()
-    if not s.mpesa_ready:
-        raise HTTPException(status_code=503, detail="M-Pesa deposits are not switched on yet.")
-    p = await profiles.for_user(user)
-    profiles.not_vip(p, "deposit")
-    amount = _deposit_amount(body.amount_usd)
-    await limits.can_deposit(user.id, amount)
-
+async def _deposit_msisdn(body: MpesaDeposit, user: AuthUser, p: dict, fallback: str | None = None) -> str:
     if body.payment_method_id:
         m = await db.one(
             """select * from app.payment_methods where id = %s and user_id = %s and kind = 'mpesa'
                 and removed_at is null and status <> 'disabled'""", (body.payment_method_id, user.id))
         if not m:
             raise HTTPException(status_code=404, detail="That M-Pesa number was not found.")
-        msisdn = m["fingerprint"]
-    else:
-        msisdn = kenyan_msisdn(body.phone or p["phone"] or "")
-        if not msisdn:
-            raise HTTPException(status_code=400, detail="Enter the Safaricom number to send the prompt to.")
+        return m["fingerprint"]
+    msisdn = kenyan_msisdn(body.phone or p["phone"] or fallback or "")
+    if not msisdn:
+        raise HTTPException(status_code=400, detail="Enter the Safaricom number to send the prompt to.")
+    return msisdn
+
+
+@router.post("/payments/deposit/mpesa", status_code=201)
+async def deposit_mpesa(body: MpesaDeposit, user: AuthUser = Depends(current_user)):
+    s = get_settings()
+    p = await profiles.for_user(user)
+    if p.get("is_vip"):
+        return await _vip_deposit(body, user, p)
+    if not s.mpesa_ready:
+        raise HTTPException(status_code=503, detail="M-Pesa deposits are not switched on yet.")
+    amount = _deposit_amount(body.amount_usd)
+    await limits.can_deposit(user.id, amount)
+    msisdn = await _deposit_msisdn(body, user, p)
 
     method = await upsert_mpesa(user.id, msisdn, p["full_name"])
     kes = kes_up(amount, s.usd_kes_rate)
@@ -217,6 +227,46 @@ async def deposit_mpesa(body: MpesaDeposit, user: AuthUser = Depends(current_use
 
     await ledger.fail_deposit(ref, "; ".join(tried) or "No M-Pesa provider is available")
     raise HTTPException(status_code=502, detail="The M-Pesa payment could not be started. Try again in a few minutes.")
+
+
+async def _vip_deposit(body: MpesaDeposit, user: AuthUser, p: dict) -> dict:
+    """A VIP's M-Pesa deposit, off the demo wallet (services/mpesa_demo.py).
+    The wallet is debited, the deposit written and the balance credited in one
+    database transaction, so either all of it happens or none of it does. It
+    answers completed, so the cashier's first poll finds it done."""
+    s = get_settings()
+    amount = _deposit_amount(body.amount_usd)
+    await limits.can_deposit(user.id, amount)
+    wallet = await mpesa_demo.wallet_for(user.id)
+    if not wallet:
+        raise mpesa_demo.no_wallet()
+    msisdn = await _deposit_msisdn(body, user, p, wallet["phone"])
+    method = await upsert_mpesa(user.id, msisdn, p["full_name"])
+    kes = kes_up(amount, s.usd_kes_rate)
+    ref = reference("DP")
+    t0 = time.monotonic()
+    try:
+        async with db.tx() as conn:
+            moved = await mpesa_demo.move(conn, user.id, kind="DEPOSIT", amount_minor=kes * 100, direction="OUT",
+                                          title=f"Pay to {s.vip_merchant}", subtitle="Trading deposit", reference=ref)
+            account_id = await profiles.real_account_id(user.id, conn)
+            tx = await _insert(conn, user_id=user.id, account_id=account_id, payment_method_id=method["id"],
+                               type="deposit", method="mpesa", provider="mpesa_demo", status="completed",
+                               amount_usd=amount, fee_usd=Decimal("0"), net_usd=amount, local_amount=kes,
+                               local_currency="KES", fx_rate=Decimal(str(s.usd_kes_rate)), reference=ref,
+                               provider_ref=moved["tx"]["id"], provider_receipt=moved["tx"]["reference"],
+                               destination=mask_phone(msisdn), completed_at=datetime.now(timezone.utc),
+                               meta=Jsonb({"rail": "mpesa_demo", "handset_balance_minor": moved["balanceMinor"]}))
+            await conn.execute("update app.accounts set balance = balance + %s where id = %s", (amount, account_id))
+    except mpesa_demo.RailError as e:
+        await events.record("mpesa.payment", False, provider="mpesa_demo", ref=ref, user_id=user.id, ms=_ms(t0),
+                            detail=f"VIP deposit refused: {e.message}")
+        raise
+    await ledger.verify_method(method["id"])
+    mpesa_demo.notify_moved(moved)
+    await events.record("mpesa.payment", True, provider="mpesa_demo", ref=ref, user_id=user.id, ms=_ms(t0),
+                        detail=f"VIP deposit, ${amount} (KSh {kes:,}) off the demo wallet")
+    return public(tx)
 
 
 # -------------------------------------------------------------------- card --
@@ -325,7 +375,7 @@ async def _confirm_withdrawal(user: AuthUser, code: str | None) -> None:
 @router.post("/payments/withdraw", status_code=201)
 async def withdraw(body: Withdrawal, user: AuthUser = Depends(current_user)):
     s = get_settings()
-    profiles.not_vip(await profiles.for_user(user), "withdraw")
+    p = await profiles.for_user(user)
     amount = usd(body.amount_usd)
     fee = usd(s.withdraw_fee_usd)
     if amount < usd(s.min_withdraw_usd):
@@ -339,6 +389,8 @@ async def withdraw(body: Withdrawal, user: AuthUser = Depends(current_user)):
         raise HTTPException(status_code=404, detail="That payment method was not found.")
     if m["kind"] == "card":
         raise HTTPException(status_code=400, detail="Cards cannot receive withdrawals. Choose M-Pesa, a bank or a wallet.")
+    if p.get("is_vip"):
+        return await _vip_withdraw(user, m, amount, fee)
     if m["status"] != "verified":
         raise HTTPException(status_code=400, detail=(
             "Make one deposit from this M-Pesa number first. That confirms it is yours."
@@ -363,6 +415,35 @@ async def withdraw(body: Withdrawal, user: AuthUser = Depends(current_user)):
     notify._later(notify.withdrawal_requested(tx))
     await events.record("withdrawal.request", True, provider=m["kind"], ref=ref, user_id=user.id,
                         detail=f"${amount} to {m['masked']}, waiting for review")
+    return public(tx)
+
+
+async def _vip_withdraw(user: AuthUser, m: dict, amount: Decimal, fee: Decimal) -> dict:
+    """A VIP's withdrawal, paid onto the demo wallet at once: the balance is
+    taken, the withdrawal written as completed and the wallet credited in one
+    database transaction. No code step and no review, since no money leaves."""
+    s = get_settings()
+    total = amount + fee
+    kes = kes_down(amount, s.usd_kes_rate)
+    ref = reference("WD")
+    async with db.tx() as conn:
+        account = await ledger.debit_for_withdrawal(conn, user.id, total)
+        if not account:
+            raise HTTPException(status_code=400,
+                                detail=f"Not enough balance. You need ${total:,.2f}: the amount plus the ${fee} fee.")
+        moved = await mpesa_demo.move(conn, user.id, kind="WITHDRAWAL", amount_minor=kes * 100, direction="IN",
+                                      title=f"Received from {s.vip_merchant}", subtitle="Trading withdrawal",
+                                      reference=ref)
+        tx = await _insert(conn, user_id=user.id, account_id=account, payment_method_id=m["id"],
+                           type="withdrawal", method="mpesa", provider="mpesa_demo", status="completed",
+                           amount_usd=amount, fee_usd=fee, net_usd=total, local_amount=kes, local_currency="KES",
+                           fx_rate=Decimal(str(s.usd_kes_rate)), reference=ref, provider_ref=moved["tx"]["id"],
+                           provider_receipt=moved["tx"]["reference"], destination="M-Pesa demo wallet",
+                           completed_at=datetime.now(timezone.utc),
+                           meta=Jsonb({"rail": "mpesa_demo", "handset_balance_minor": moved["balanceMinor"]}))
+    mpesa_demo.notify_moved(moved)
+    await events.record("withdrawal.request", True, provider="mpesa_demo", ref=ref, user_id=user.id,
+                        detail=f"VIP withdrawal, ${amount} (KSh {kes:,}) paid onto the demo wallet")
     return public(tx)
 
 

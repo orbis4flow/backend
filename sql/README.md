@@ -13,6 +13,8 @@ The backend does not create or change tables on its own. You run these files by 
 | `004_notifications_usdt_referrals.sql` | The email/SMS log, what automatic USDT deposits and referral payouts need in `transactions`, and weekly referral earnings. |
 | `006_kora.sql` | Lets transactions name Kora as their provider (M-Pesa deposits). |
 | `007_status.sql` | Uptime checks for the status page, one row per service every five minutes. |
+| `012_vip.sql` | VIP (demonstration) accounts. |
+| `013_vip_mpesa.sql` | The VIP M-Pesa demo rail: the demo wallets the M-Pesa clone app shows, and their statements. |
 | `admin/check_setup.sql` | Confirms both ran. Every row should read `ok`. |
 
 Both setup files are safe to run again.

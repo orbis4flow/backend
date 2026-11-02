@@ -14,9 +14,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import db, supabase_auth
-from .services import deposits, monitor, prices, referrals as referral_jobs, tron
+from .services import deposits, monitor, mpesa_demo, prices, sms, referrals as referral_jobs, tron
 from .config import get_settings
-from .routers import account, auth, market, me, payment_methods, payments, referrals, support, trades, webhooks
+from .routers import account, auth, market, me, mpesa, payment_methods, payments, referrals, support, trades, webhooks
 from .routers import admin as admin_router, prices as prices_router
 
 # psycopg's async driver needs the selector loop on Windows (local dev only)
@@ -65,14 +65,34 @@ app.add_middleware(
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_error(_: Request, exc: RequestValidationError):
+async def validation_error(request: Request, exc: RequestValidationError):
     """One readable sentence instead of pydantic's list, so the UI can show it as is."""
     first = exc.errors()[0] if exc.errors() else {}
     field = ".".join(str(p) for p in first.get("loc", [])[1:]) or "input"
     msg = first.get("msg", "is not valid").removeprefix("Value error, ")
     names = {"email": "Email", "password": "Password", "name": "Name", "amount_usd": "Amount",
-             "phone": "Phone number", "referral_code": "Referral code"}
-    return JSONResponse(status_code=422, content={"detail": f"{names.get(field, field.replace('_', ' ').capitalize())}: {msg}"})
+             "phone": "Phone number", "referral_code": "Referral code", "pin": "PIN", "amountMinor": "Amount"}
+    text = f"{names.get(field, field.replace('_', ' ').capitalize())}: {msg}"
+    if field == "pin":
+        text = "Enter the four digit PIN."
+    content = {"detail": text}
+    if _handset(request):                               # the clone app reads error.message
+        content.update(ok=False, error={"code": "validation", "message": text})
+    return JSONResponse(status_code=422, content=content)
+
+
+def _handset(request: Request) -> bool:
+    return request.url.path.startswith("/mpesa/")
+
+
+@app.exception_handler(mpesa_demo.RailError)
+async def rail_error(request: Request, exc: mpesa_demo.RailError):
+    """The demo rail's refusals: in the clone app's shape on /mpesa, as a plain
+    detail for the cashier and the admin site."""
+    content = {"detail": exc.message}
+    if _handset(request):
+        content.update(ok=False, error={"code": exc.code, "message": exc.message})
+    return JSONResponse(status_code=exc.status, content=content)
 
 
 @app.exception_handler(Exception)
@@ -82,7 +102,8 @@ async def unexpected(_: Request, exc: Exception):
 
 
 for r in (auth.router, me.router, payment_methods.router, referrals.router, payments.router, trades.router,
-          market.router, prices_router.router, admin_router.router, account.router, support.router, webhooks.router):
+          market.router, prices_router.router, admin_router.router, account.router, support.router, webhooks.router,
+          mpesa.router):
     app.include_router(r)
 
 
@@ -126,8 +147,17 @@ async def health():
             security = "ok"
         except Exception:                               # sql/005 not run yet
             security = "run sql/005_preferences_security.sql"
+    vip_rail = "unknown"
+    if database == "ok":
+        try:
+            await db.one("select 1 from app.mpesa_demo_wallet limit 1")
+            vip_rail = "ok"
+        except Exception:                               # sql/013 not run yet
+            vip_rail = "run sql/013_vip_mpesa.sql"
     return {"ok": database == "ok", "database": database, "trading": trading, "notifications_usdt_referrals": extras,
             "preferences_security": security,
             "mpesa_provider": "kora" if s.mpesa_uses_kora else "payhero",
             "kora": s.kora_ready, "payhero": s.payhero_ready, "paystack": s.paystack_ready,
-            "assistant": bool(s.groq_api_key), "email": s.email_ready, "sms": s.sms_ready, "news": bool(s.finnhub_api_key)}
+            "assistant": bool(s.groq_api_key), "email": s.email_ready, "sms": s.sms_ready,
+            "sms_gateway": sms.provider(), "sms_sender": sms.sender(), "vip_mpesa": vip_rail,
+            "news": bool(s.finnhub_api_key)}
