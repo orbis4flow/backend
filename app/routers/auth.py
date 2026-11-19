@@ -15,7 +15,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 class SignUp(BaseModel):
-    name: str = Field(min_length=2, max_length=80)
+    name: str = Field(default="", max_length=80)        # optional: the sign-up form no longer asks
     email: EmailStr
     password: str = Field(min_length=8, max_length=72)
     # the number M-Pesa prompts by default; several accounts may share one
@@ -73,7 +73,7 @@ async def sign_up(body: SignUp):
     try:
         res = await supabase_auth.sign_up(
             body.email, body.password,
-            {"full_name": body.name.strip(), "referral_code": code, "phone": phone},
+            {"full_name": body.name.strip() or None, "referral_code": code, "phone": phone},
             redirect_to=f"{s.frontend_url}/login?confirmed=1",
         )
     except HTTPException as e:
@@ -90,7 +90,7 @@ async def sign_up(body: SignUp):
     if not user.get("identities"):
         await events.record("auth.signup", False, provider="email", detail=f"{body.email}: already has an account")
         raise HTTPException(status_code=409, detail="An account with this email already exists. Log in instead.")
-    await profiles.ensure(user["id"], user.get("email") or body.email, body.name, code, phone, "email")
+    await profiles.ensure(user["id"], user.get("email") or body.email, body.name.strip() or None, code, phone, "email")
     await events.record("auth.signup", True, provider="email", user_id=user["id"],
                         detail=f"{body.email}: confirmation email sent")
     return {"confirm_email": True, "email": body.email}

@@ -15,20 +15,26 @@ by M-Pesa through a demo wallet (sql/013_vip_mpesa.sql) that the M-Pesa clone
 app shows, set up here (PIN, balance, Fuliza limit, phone), or is credited
 here directly. The totals on the overview leave them out.
 """
+import base64
+import hashlib
 import hmac
+import secrets
+from contextlib import asynccontextmanager
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Literal
+from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from psycopg.errors import UndefinedColumn, UndefinedTable, UniqueViolation
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
 from .. import db
 from ..config import get_settings
-from ..services import mpesa_demo, notify, prices, sms
+from ..services import kora, mpesa_demo, notify, paystack, prices, sms, verification
 from ..util import kenyan_msisdn, reference, usd
 
 router = APIRouter(prefix="/admin", tags=["admin"], include_in_schema=False)
@@ -42,21 +48,68 @@ def _ip(request: Request) -> str:
     return (fwd.split(",")[0].strip() if fwd else "") or (request.client.host if request.client else "")
 
 
-async def admin(request: Request) -> str:
-    token = get_settings().admin_token
-    if len(token) < 32:
-        raise HTTPException(status_code=404, detail="Not Found")
-    ip = _ip(request)
+class Principal(str):
+    """Who is calling: the caller's IP (it is a str, for the audit log), plus
+    the admin account behind the session. ADMIN_TOKEN itself is a super admin."""
+    id: str | None
+    email: str
+    name: str
+    role: str
+
+    @classmethod
+    def make(cls, ip: str, id: str | None, email: str, name: str, role: str) -> "Principal":
+        p = cls(ip)
+        p.id, p.email, p.name, p.role = id, email, name, role
+        return p
+
+
+ROLES = ("superadmin", "admin", "finance", "support")
+
+
+def need(who: Principal, *roles: str) -> None:
+    """Refuse a change the caller's role does not cover. A super admin can do everything."""
+    if who.role != "superadmin" and who.role not in roles:
+        raise HTTPException(status_code=403, detail="Your admin role does not allow this. Ask a super admin.")
+
+
+def _missed(ip: str) -> None:
     misses = _misses[ip]
     while misses and misses[0] < time.monotonic() - MISS_WINDOW:
         misses.popleft()
     if len(misses) >= MISS_LIMIT:
-        raise HTTPException(status_code=429, detail="Too many wrong tokens. Try again in 15 minutes.")
+        raise HTTPException(status_code=429, detail="Too many failed attempts. Try again in 15 minutes.")
+
+
+def _hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+async def admin(request: Request) -> Principal:
+    token = get_settings().admin_token
+    if len(token) < 32:
+        raise HTTPException(status_code=404, detail="Not Found")
+    ip = _ip(request)
+    _missed(ip)
     given = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
-    if not given or not hmac.compare_digest(given.encode(), token.encode()):
-        misses.append(time.monotonic())
-        raise HTTPException(status_code=401, detail="That admin token is not right.")
-    return ip
+    if given and hmac.compare_digest(given.encode(), token.encode()):
+        return Principal.make(ip, None, "ADMIN_TOKEN", "Admin token", "superadmin")
+    if given:
+        try:
+            row = await db.one(
+                """select u.id, u.email, u.name, u.role from app.admin_sessions s
+                     join app.admin_users u on u.id = s.admin_id
+                    where s.token_hash = %s and s.expires_at > now() and u.active""", (_hash(given),))
+        except Exception:                               # sql/016 not run, or the database is down
+            row = None
+        if row:
+            return Principal.make(ip, str(row["id"]), row["email"], row["name"], row["role"])
+    _misses[ip].append(time.monotonic())
+    raise HTTPException(status_code=401, detail="Your session has ended. Sign in again.")
+
+
+@asynccontextmanager
+async def _nullctx():
+    yield
 
 
 def _f(v) -> float:
@@ -67,9 +120,31 @@ def _iso(v) -> str | None:
     return v.isoformat() if v else None
 
 
+NAIROBI = ZoneInfo("Africa/Nairobi")
+
+
+def _midnight() -> datetime:
+    """The start of today in Nairobi, which is what "today" means on the admin site."""
+    return datetime.now(NAIROBI).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _range(since: datetime | None, until: datetime | None) -> tuple[datetime | None, datetime | None]:
+    if since and until and since > until:
+        raise HTTPException(status_code=400, detail="The start of the range is after its end.")
+    return since, until
+
+
 async def _log(action: str, target: str, user_id, note: str | None, ip: str, conn=None) -> None:
+    actor = getattr(ip, "email", None)
+    try:
+        async with (conn.transaction() if conn is not None else _nullctx()):
+            await db.run("insert into app.admin_actions (action, target, user_id, note, ip, actor) values (%s, %s, %s, %s, %s, %s)",
+                         (action, target, user_id, note, str(ip), actor), conn=conn)
+        return
+    except UndefinedColumn:                             # sql/016 not run yet
+        pass
     await db.run("insert into app.admin_actions (action, target, user_id, note, ip) values (%s, %s, %s, %s, %s)",
-                 (action, target, user_id, note, ip), conn=conn)
+                 (action, target, user_id, note, str(ip)), conn=conn)
 
 
 # ---------------------------------------------------------------- overview --
@@ -105,7 +180,22 @@ async def overview(_: str = Depends(admin)):
     methods = await db.one(
         "select count(*) as n from app.payment_methods where status = 'pending' and removed_at is null")
     snap = prices.snapshot()
+    today = await db.one(
+        """select coalesce(sum(t.net_usd) filter (where t.type = 'deposit'), 0) as dep,
+                  count(*) filter (where t.type = 'deposit') as dep_n,
+                  coalesce(sum(t.amount_usd) filter (where t.type = 'withdrawal'), 0) as wd,
+                  count(*) filter (where t.type = 'withdrawal') as wd_n
+             from app.transactions t join app.profiles p on p.id = t.user_id
+            where t.status = 'completed' and not p.is_vip and t.completed_at >= %s""", (_midnight(),))
+    try:
+        kyc = (await db.one("select count(*) as n from app.verifications where status = 'pending'"))["n"]
+    except UndefinedTable:
+        kyc = None
     return {
+        "usdKesRate": get_settings().usd_kes_rate,
+        "depositsToday": _f(today["dep"]), "depositsTodayCount": today["dep_n"],
+        "withdrawalsToday": _f(today["wd"]), "withdrawalsTodayCount": today["wd_n"],
+        "verificationsWaiting": kyc,
         "users": users["n"], "newUsers24h": users["new"], "vipUsers": users["vip"],
         "realBalances": _f(money["real_balances"]),
         "deposits24h": _f(tx["dep_day"]), "deposits24hCount": tx["dep_day_n"], "deposits7d": _f(tx["dep_week"]),
@@ -170,7 +260,10 @@ async def user(user_id: str, _: str = Depends(admin)):
     real_pl = await db.one(
         "select coalesce(sum(profit), 0) as pl from app.trades where user_id = %s and account_kind = 'real' and status <> 'open'",
         (user_id,))
+    kyc = await verification.state(user_id)
     return {
+        "verification": {"ready": kyc["ready"], "verified": kyc["verified"], "identity": kyc["identity"],
+                         "address": kyc["address"]},
         "id": str(p["id"]), "email": p["email"], "name": p["full_name"] or "", "phone": p["phone"] or "",
         "country": p["country_name"], "currency": p["currency"], "referralCode": p["referral_code"],
         "referredBy": ref["email"] if ref else None, "createdAt": _iso(p["created_at"]),
@@ -193,7 +286,8 @@ def _tx(t: dict) -> dict:
             "localCurrency": t.get("local_currency"), "destination": t.get("destination"),
             "receipt": t.get("provider_receipt"), "failure": t.get("failure_reason"),
             "createdAt": _iso(t["created_at"]), "completedAt": _iso(t.get("completed_at")),
-            **({"email": t["email"], "userId": str(t["user_id"])} if "email" in t else {})}
+            **({"email": t["email"], "userId": str(t["user_id"])} if "email" in t else {}),
+            **({"vip": t["is_vip"]} if "is_vip" in t else {})}
 
 
 def _trade(t: dict) -> dict:
@@ -208,10 +302,12 @@ def _trade(t: dict) -> dict:
 
 
 # ------------------------------------------------------------ transactions --
-@router.get("/transactions")
-async def transactions(type: Literal["deposit", "withdrawal", "referral", "credit", "debit", "all"] = "all",
-                       status: Literal["waiting", "pending", "completed", "failed", "all"] = "all",
-                       limit: int = Query(default=100, ge=1, le=500), _: str = Depends(admin)):
+TxType = Literal["deposit", "withdrawal", "referral", "credit", "debit", "all"]
+TxStatus = Literal["waiting", "pending", "completed", "failed", "all"]
+TxMethod = Literal["mpesa", "card", "bank", "usdt", "referral", "admin", "all"]
+
+
+def _tx_where(type: str, status: str, method: str, since, until, vip: bool) -> tuple[str, list]:
     where, args = ["true"], []
     if type != "all":
         where.append("t.type = %s"); args.append(type)
@@ -221,11 +317,51 @@ async def transactions(type: Literal["deposit", "withdrawal", "referral", "credi
         where.append("t.status in ('failed', 'cancelled')")
     elif status != "all":
         where.append("t.status = %s"); args.append(status)
+    if method != "all":
+        where.append("t.method = %s"); args.append(method)
+    if since:
+        where.append("t.created_at >= %s"); args.append(since)
+    if until:
+        where.append("t.created_at < %s"); args.append(until)
+    if not vip:
+        where.append("not p.is_vip")
+    return " and ".join(where), args
+
+
+@router.get("/transactions")
+async def transactions(type: TxType = "all", status: TxStatus = "all", method: TxMethod = "all",
+                       since: datetime | None = None, until: datetime | None = None, vip: bool = True,
+                       limit: int = Query(default=100, ge=1, le=500), _: str = Depends(admin)):
+    """`since` and `until` bound created_at (until exclusive). `vip=false` leaves VIP accounts out."""
+    since, until = _range(since, until)
+    where, args = _tx_where(type, status, method, since, until, vip)
     rows = await db.many(
-        f"""select t.*, p.email from app.transactions t join app.profiles p on p.id = t.user_id
-             where {' and '.join(where)} order by t.created_at {'asc' if status == 'waiting' else 'desc'} limit %s""",
+        f"""select t.*, p.email, p.is_vip from app.transactions t join app.profiles p on p.id = t.user_id
+             where {where} order by t.created_at {'asc' if status == 'waiting' else 'desc'} limit %s""",
         (*args, limit))
     return [_tx(t) for t in rows]
+
+
+@router.get("/transactions/totals")
+async def transaction_totals(type: TxType = "all", status: TxStatus = "all", method: TxMethod = "all",
+                             since: datetime | None = None, until: datetime | None = None, vip: bool = True,
+                             _: str = Depends(admin)):
+    """What the same filters add up to, whatever the row limit: by status, so a
+    deposits page can show what came in next to what is still pending."""
+    since, until = _range(since, until)
+    where, args = _tx_where(type, status, method, since, until, vip)
+    rows = await db.many(
+        f"""select case when t.status in ('review', 'processing') then 'waiting'
+                        when t.status in ('failed', 'cancelled') then 'failed' else t.status end as s,
+                   count(*) as n, coalesce(sum(t.amount_usd), 0) as amount, coalesce(sum(t.net_usd), 0) as net,
+                   coalesce(sum(t.fee_usd), 0) as fee,
+                   coalesce(sum(t.local_amount) filter (where t.local_currency = 'KES'), 0) as kes,
+                   count(distinct t.user_id) as users
+              from app.transactions t join app.profiles p on p.id = t.user_id
+             where {where} group by 1""", args)
+    out = {r["s"]: {"count": r["n"], "amount": _f(r["amount"]), "net": _f(r["net"]), "fee": _f(r["fee"]),
+                    "kes": _f(r["kes"]), "users": r["users"]} for r in rows}
+    return {"byStatus": out, "count": sum(r["n"] for r in rows)}
 
 
 class Approve(BaseModel):
@@ -237,7 +373,8 @@ class Reject(BaseModel):
 
 
 @router.post("/withdrawals/{ref}/approve")
-async def approve(ref: str, body: Approve, ip: str = Depends(admin)):
+async def approve(ref: str, body: Approve, ip: Principal = Depends(admin)):
+    need(ip, "finance")
     async with db.tx() as conn:
         cur = await conn.execute(
             """update app.transactions set status = 'completed', completed_at = now(), provider_receipt = %s
@@ -252,7 +389,8 @@ async def approve(ref: str, body: Approve, ip: str = Depends(admin)):
 
 
 @router.post("/withdrawals/{ref}/reject")
-async def reject(ref: str, body: Reject, ip: str = Depends(admin)):
+async def reject(ref: str, body: Reject, ip: Principal = Depends(admin)):
+    need(ip, "finance")
     async with db.tx() as conn:
         cur = await conn.execute(
             """update app.transactions set status = 'failed', failure_reason = %s, completed_at = now()
@@ -308,10 +446,11 @@ async def _move(conn, user_id: str, account_id, type: str, amount: Decimal, note
 
 
 @router.post("/users/{user_id}/vip")
-async def set_vip(user_id: str, body: VipChange, ip: str = Depends(admin)):
+async def set_vip(user_id: str, body: VipChange, ip: Principal = Depends(admin)):
     """Make a user a VIP, or a VIP an ordinary user again. A user becomes a VIP
     only with nothing in the real account, so no real money is ever locked in
     one; a VIP stops being one with its credited balance taken back to zero."""
+    need(ip, "admin")
     note = (body.note or "").strip() or None
     async with db.tx() as conn:
         row = await _real(conn, user_id)
@@ -349,9 +488,10 @@ async def set_vip(user_id: str, body: VipChange, ip: str = Depends(admin)):
 
 
 @router.post("/users/{user_id}/balance")
-async def change_balance(user_id: str, body: BalanceChange, ip: str = Depends(admin)):
+async def change_balance(user_id: str, body: BalanceChange, ip: Principal = Depends(admin)):
     """Credit or debit a VIP's real balance. Ordinary users' balances are never
     touched from here: their money only moves through deposits and withdrawals."""
+    need(ip, "admin")
     amount = usd(body.amount_usd)
     note = (body.note or "").strip() or None
     if amount <= 0:
@@ -377,9 +517,10 @@ class StagedChange(BaseModel):
 
 
 @router.post("/users/{user_id}/staged")
-async def set_staged(user_id: str, body: StagedChange, ip: str = Depends(admin)):
+async def set_staged(user_id: str, body: StagedChange, ip: Principal = Depends(admin)):
     """Staged results for a VIP (sql/014): its contracts are settled in its
     favour STAGED_WIN_PCT of the time. Each contract is marked staged."""
+    need(ip, "admin")
     p = await _profile(user_id)
     if body.on and not p["is_vip"]:
         raise HTTPException(status_code=403, detail="Staged results are only for VIP accounts. Make this user a VIP first.")
@@ -433,9 +574,10 @@ async def wallet(user_id: str, _: str = Depends(admin)):
 
 
 @router.post("/users/{user_id}/wallet")
-async def set_wallet(user_id: str, body: WalletChange, ip: str = Depends(admin)):
+async def set_wallet(user_id: str, body: WalletChange, ip: Principal = Depends(admin)):
     """Create the demo wallet (a PIN is needed then) or change any part of it.
     The name and phone default to the profile's."""
+    need(ip, "admin")
     p = await _profile(user_id)
     if not p["is_vip"]:
         raise HTTPException(status_code=403, detail="Only VIP accounts have a demo wallet. Make this user a VIP first.")
@@ -459,9 +601,10 @@ async def set_wallet(user_id: str, body: WalletChange, ip: str = Depends(admin))
 
 
 @router.post("/users/{user_id}/wallet/reset")
-async def reset_wallet(user_id: str, body: WalletReset, ip: str = Depends(admin)):
+async def reset_wallet(user_id: str, body: WalletReset, ip: Principal = Depends(admin)):
     """Between rehearsals: an empty statement and nothing owed, at the balance
     given (or the current one). The handset stays linked."""
+    need(ip, "admin")
     await _profile(user_id)
     w = await mpesa_demo.reset(user_id, None if body.balance_kes is None else mpesa_demo.kes_minor(body.balance_kes))
     await _log("wallet.reset", user_id, user_id, None if body.balance_kes is None else f"KSh {body.balance_kes:,.2f}", ip)
@@ -469,9 +612,10 @@ async def reset_wallet(user_id: str, body: WalletReset, ip: str = Depends(admin)
 
 
 @router.post("/users/{user_id}/wallet/test-sms")
-async def test_sms(user_id: str, body: TestSms, ip: str = Depends(admin)):
+async def test_sms(user_id: str, body: TestSms, ip: Principal = Depends(admin)):
     """One plainly worded text to the wallet's number, sent while you wait, so
     the gateway, the sender and the number are known to work before a demo."""
+    need(ip, "admin")
     await _profile(user_id)
     if not get_settings().sms_ready:
         raise HTTPException(status_code=400, detail="No SMS gateway is configured. Set CELCOM_API_KEY, CELCOM_PARTNER_ID "
@@ -489,8 +633,9 @@ async def test_sms(user_id: str, body: TestSms, ip: str = Depends(admin)):
 
 
 @router.post("/users/{user_id}/wallet/clear")
-async def clear_wallet(user_id: str, ip: str = Depends(admin)):
+async def clear_wallet(user_id: str, ip: Principal = Depends(admin)):
     """Remove the wallet and its statement. A handset linked to it is unlinked."""
+    need(ip, "admin")
     await _profile(user_id)
     await mpesa_demo.clear(user_id)
     await _log("wallet.clear", user_id, user_id, None, ip)
@@ -517,7 +662,8 @@ class MethodChange(BaseModel):
 
 @router.post("/payment-methods/{method_id}/{action}")
 async def change_method(method_id: str, action: Literal["verify", "block"], body: MethodChange,
-                        ip: str = Depends(admin)):
+                        ip: Principal = Depends(admin)):
+    need(ip, "admin", "support")
     sql = ("update app.payment_methods set status = 'verified' where id = %s and status <> 'verified' returning *"
            if action == "verify" else
            "update app.payment_methods set status = 'disabled', is_default = false where id = %s returning *")
@@ -616,7 +762,7 @@ async def actions(limit: int = Query(default=100, ge=1, le=500), _: str = Depend
             order by a.created_at desc limit %s""", (limit,))
     return [{"id": r["id"], "action": r["action"], "target": r["target"], "email": r["email"], "note": r["note"],
              "userId": str(r["user_id"]) if r["user_id"] else None,
-             "ip": r["ip"], "at": _iso(r["created_at"])} for r in rows]
+             "ip": r["ip"], "actor": r.get("actor"), "at": _iso(r["created_at"])} for r in rows]
 
 
 @router.get("/system")
@@ -642,3 +788,555 @@ async def system(_: str = Depends(admin)):
         },
         "markets": markets,
     }
+
+
+# ----------------------------------------------------------------- finance --
+@router.get("/finance")
+async def finance(since: datetime | None = None, until: datetime | None = None, _: str = Depends(admin)):
+    """Real money over a range (default: the last 30 days), VIP accounts left
+    out: what came in, what went out, what the house made on contracts, and
+    the same per day (Nairobi days) for the chart. Balances are as of now."""
+    now = datetime.now(NAIROBI)
+    since = since or (_midnight() - timedelta(days=29))
+    until = until or now
+    since, until = _range(since, until)
+    rng = (since, until)
+    money = await db.one(
+        """select
+             coalesce(sum(t.net_usd)    filter (where t.type = 'deposit'), 0)    as dep,
+             count(*)                   filter (where t.type = 'deposit')        as dep_n,
+             count(distinct t.user_id)  filter (where t.type = 'deposit')        as depositors,
+             coalesce(sum(t.fee_usd)    filter (where t.type = 'deposit'), 0)    as dep_fee,
+             coalesce(sum(t.amount_usd) filter (where t.type = 'withdrawal'), 0) as wd,
+             count(*)                   filter (where t.type = 'withdrawal')     as wd_n,
+             coalesce(sum(t.fee_usd)    filter (where t.type = 'withdrawal'), 0) as wd_fee,
+             coalesce(sum(t.net_usd)    filter (where t.type = 'referral'), 0)   as referral
+           from app.transactions t join app.profiles p on p.id = t.user_id
+          where t.status = 'completed' and not p.is_vip and t.completed_at >= %s and t.completed_at < %s""", rng)
+    first = await db.one(
+        """select count(*) as n from (
+             select t.user_id, min(t.completed_at) as first_at from app.transactions t
+               join app.profiles p on p.id = t.user_id
+              where t.type = 'deposit' and t.status = 'completed' and not p.is_vip group by t.user_id) f
+            where f.first_at >= %s and f.first_at < %s""", rng)
+    trades = await db.one(
+        """select count(*) as n, coalesce(sum(stake), 0) as volume, coalesce(-sum(profit), 0) as house,
+                  count(distinct user_id) as traders
+             from app.trades t where account_kind = 'real' and status <> 'open' and settled_at >= %s and settled_at < %s
+              and not exists (select 1 from app.profiles p where p.id = t.user_id and p.is_vip)""", rng)
+    held = await db.one(
+        """select coalesce(sum(a.balance), 0) as real, count(*) filter (where a.balance > 0) as funded
+             from app.accounts a join app.profiles p on p.id = a.user_id where a.kind = 'real' and not p.is_vip""")
+    waiting = await db.one(
+        """select count(*) as n, coalesce(sum(t.net_usd), 0) as usd from app.transactions t
+             join app.profiles p on p.id = t.user_id
+            where t.type = 'withdrawal' and t.status in ('review', 'processing') and not p.is_vip""")
+    by_method = await db.many(
+        """select t.type, t.method, count(*) as n, coalesce(sum(case when t.type = 'deposit' then t.net_usd else t.amount_usd end), 0) as usd
+             from app.transactions t join app.profiles p on p.id = t.user_id
+            where t.status = 'completed' and not p.is_vip and t.type in ('deposit', 'withdrawal')
+              and t.completed_at >= %s and t.completed_at < %s
+            group by 1, 2 order by usd desc""", rng)
+    days = await db.many(
+        """with d as (
+             select generate_series(date_trunc('day', %s::timestamptz at time zone 'Africa/Nairobi'),
+                                    date_trunc('day', %s::timestamptz at time zone 'Africa/Nairobi'),
+                                    interval '1 day') as day),
+           m as (
+             select date_trunc('day', t.completed_at at time zone 'Africa/Nairobi') as day,
+                    coalesce(sum(t.net_usd) filter (where t.type = 'deposit'), 0) as dep,
+                    coalesce(sum(t.amount_usd) filter (where t.type = 'withdrawal'), 0) as wd
+               from app.transactions t join app.profiles p on p.id = t.user_id
+              where t.status = 'completed' and not p.is_vip and t.type in ('deposit', 'withdrawal')
+                and t.completed_at >= %s and t.completed_at < %s group by 1),
+           h as (
+             select date_trunc('day', t.settled_at at time zone 'Africa/Nairobi') as day, coalesce(-sum(t.profit), 0) as house
+               from app.trades t
+              where t.account_kind = 'real' and t.status <> 'open' and t.settled_at >= %s and t.settled_at < %s
+                and not exists (select 1 from app.profiles p where p.id = t.user_id and p.is_vip) group by 1)
+           select d.day, coalesce(m.dep, 0) as dep, coalesce(m.wd, 0) as wd, coalesce(h.house, 0) as house
+             from d left join m using (day) left join h using (day) order by d.day""",
+        (since, until, since, until, since, until))
+    top = await db.many(
+        """select p.id, p.email, p.full_name, count(*) as n, sum(t.net_usd) as usd
+             from app.transactions t join app.profiles p on p.id = t.user_id
+            where t.type = 'deposit' and t.status = 'completed' and not p.is_vip
+              and t.completed_at >= %s and t.completed_at < %s
+            group by p.id order by usd desc limit 8""", rng)
+    return {
+        "since": since.isoformat(), "until": until.isoformat(), "usdKesRate": get_settings().usd_kes_rate,
+        "deposits": _f(money["dep"]), "depositsCount": money["dep_n"], "depositors": money["depositors"],
+        "firstDeposits": first["n"], "depositFees": _f(money["dep_fee"]),
+        "withdrawals": _f(money["wd"]), "withdrawalsCount": money["wd_n"], "withdrawalFees": _f(money["wd_fee"]),
+        "referralPaid": _f(money["referral"]),
+        "net": _f(money["dep"]) - _f(money["wd"]),
+        "houseResult": _f(trades["house"]), "volume": _f(trades["volume"]), "trades": trades["n"],
+        "traders": trades["traders"],
+        "realBalances": _f(held["real"]), "fundedAccounts": held["funded"],
+        "withdrawalsWaiting": waiting["n"], "withdrawalsWaitingUsd": _f(waiting["usd"]),
+        "byMethod": [{"type": r["type"], "method": r["method"], "count": r["n"], "usd": _f(r["usd"])} for r in by_method],
+        "days": [{"day": r["day"].date().isoformat(), "deposits": _f(r["dep"]), "withdrawals": _f(r["wd"]),
+                  "house": _f(r["house"])} for r in days],
+        "topDepositors": [{"id": str(r["id"]), "email": r["email"], "name": r["full_name"] or "", "count": r["n"],
+                           "usd": _f(r["usd"])} for r in top],
+    }
+
+
+# ----------------------------------------------------------- verification --
+def _kyc_row(r: dict) -> dict:
+    return {"id": str(r["id"]), "userId": str(r["user_id"]), "email": r["email"], "name": r["full_name"] or "",
+            "phone": r["phone"] or "", "country": r["country_name"], "joined": _iso(r["joined"]),
+            "kind": r["kind"], "docType": r["doc_type"], "docName": verification.DOC_NAME.get(r["doc_type"], r["doc_type"]),
+            "status": r["status"], "reason": r["reason"], "createdAt": _iso(r["created_at"]),
+            "decidedAt": _iso(r["decided_at"]), "vip": r["is_vip"],
+            "files": [{"id": str(f["id"]), "side": f["side"], "mime": f["mime"], "size": f["size"]} for f in r.get("files", [])]}
+
+
+_KYC = """select v.*, p.email, p.full_name, p.phone, p.country_name, p.created_at as joined, p.is_vip
+            from app.verifications v join app.profiles p on p.id = v.user_id"""
+
+
+@router.get("/verifications")
+async def verifications(status: Literal["pending", "approved", "rejected", "all"] = "pending",
+                        kind: Literal["identity", "address", "all"] = "all", _: str = Depends(admin)):
+    where, args = ["true"], []
+    if status != "all":
+        where.append("v.status = %s"); args.append(status)
+    if kind != "all":
+        where.append("v.kind = %s"); args.append(kind)
+    try:
+        rows = await db.many(f"{_KYC} where {' and '.join(where)} order by v.created_at "
+                             f"{'asc' if status == 'pending' else 'desc'} limit 300", args)
+        files = await db.many(
+            "select id, verification_id, side, mime, size from app.verification_files where verification_id = any(%s) "
+            "order by created_at", ([r["id"] for r in rows],)) if rows else []
+    except UndefinedTable:
+        raise HTTPException(status_code=503, detail="Run sql/015_verification.sql on the database first.")
+    for r in rows:
+        r["files"] = [f for f in files if f["verification_id"] == r["id"]]
+    return [_kyc_row(r) for r in rows]
+
+
+@router.get("/verifications/{vid}/files/{fid}")
+async def verification_file(vid: str, fid: str, _: str = Depends(admin)):
+    """The file itself. The admin site fetches it with the token and shows it
+    from memory; it is never cached or given a public address."""
+    try:
+        f = await db.one("select mime, data from app.verification_files where id = %s and verification_id = %s", (fid, vid))
+    except Exception:
+        f = None
+    if not f:
+        raise HTTPException(status_code=404, detail="No such file.")
+    return Response(content=bytes(f["data"]), media_type=f["mime"],
+                    headers={"cache-control": "no-store", "x-content-type-options": "nosniff"})
+
+
+class KycDecision(BaseModel):
+    reason: str | None = Field(default=None, max_length=300)
+
+
+@router.post("/verifications/{vid}/{action}")
+async def decide_verification(vid: str, action: Literal["approve", "reject"], body: KycDecision, ip: Principal = Depends(admin)):
+    need(ip, "admin", "support")
+    reason = (body.reason or "").strip() or None
+    if action == "reject" and (not reason or len(reason) < 3):
+        raise HTTPException(status_code=400, detail="Say why, so the user knows what to send instead.")
+    async with db.tx() as conn:
+        try:
+            cur = await conn.execute(
+                """update app.verifications set status = %s, reason = %s, decided_at = now()
+                    where id = %s and status = 'pending' returning *""",
+                ("approved" if action == "approve" else "rejected", reason if action == "reject" else None, vid))
+        except Exception:
+            raise HTTPException(status_code=404, detail="No such submission.")
+        v = await cur.fetchone()
+        if not v:
+            raise HTTPException(status_code=409, detail="That submission was already decided, or replaced by a newer one.")
+        await _log(f"verification.{action}", str(vid), v["user_id"],
+                   f"{verification.DOC_NAME.get(v['doc_type'], v['doc_type'])}" + (f": {reason}" if reason else ""), ip, conn)
+    notify._later(notify.verification_decided(v["user_id"], v["kind"], verification.DOC_NAME.get(v["doc_type"], v["doc_type"]),
+                                              action == "approve", reason))
+    return {"id": str(v["id"]), "status": v["status"]}
+
+
+# -------------------------------------------------------------- test bench --
+async def _timed(fn) -> dict:
+    start = time.monotonic()
+    try:
+        out = await fn()
+        ok, detail = (out if isinstance(out, tuple) else (True, out))
+    except Exception as e:
+        ok, detail = False, str(e) or e.__class__.__name__
+    return {"ok": ok, "detail": detail, "ms": round((time.monotonic() - start) * 1000)}
+
+
+def _ago(dt) -> str:
+    if not dt:
+        return "never"
+    secs = (datetime.now(timezone.utc) - dt).total_seconds()
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= size:
+            return f"{int(secs // size)}{unit} ago"
+    return "just now"
+
+
+async def _last_event(prefix: str) -> str:
+    r = await db.one(
+        """select max(created_at) filter (where ok) as good, max(created_at) filter (where not ok) as bad
+             from app.events where kind like %s and created_at > now() - interval '30 days'""", (prefix + "%",))
+    return f"last success {_ago(r['good'])}, last failure {_ago(r['bad'])}"
+
+
+async def _t_database():
+    r = await db.one("select count(*) as n from app.profiles")
+    return True, f"answered, {r['n']} profiles"
+
+
+async def _t_schema():
+    missing = []
+    for table, file in (("app.trades", "003"), ("app.referral_earnings", "004"), ("app.sessions", "005"),
+                        ("app.events", "010"), ("app.mpesa_demo_wallet", "013"), ("app.verifications", "015")):
+        try:
+            await db.one(f"select 1 from {table} limit 1")
+        except Exception:
+            missing.append(f"sql/{file} ({table})")
+    return (False, "missing: " + ", ".join(missing)) if missing else (True, "every migration through 015 is in place")
+
+
+async def _t_feed():
+    snap = prices.snapshot()
+    live = sum(1 for v in snap.values() if v["live"])
+    return live > 0, f"{live} of {len(prices.MARKETS)} markets ticking"
+
+
+async def _t_payhero():
+    s = get_settings()
+    if not s.payhero_ready:
+        return False, "not configured: set PAYHERO_API_USERNAME and PAYHERO_API_PASSWORD"
+    return True, f"configured, channel {s.payhero_channel_id}; {await _last_event('mpesa')}"
+
+
+async def _t_kora():
+    if not get_settings().kora_ready:
+        return False, "not configured: set KORA_SECRET_KEY"
+    await kora._call("GET", "/balances")
+    return True, "the key was accepted"
+
+
+async def _t_paystack():
+    if not get_settings().paystack_ready:
+        return False, "not configured: set PAYSTACK_SECRET_KEY"
+    await paystack._call("GET", "/balance")
+    return True, "the key was accepted"
+
+
+async def _t_sms():
+    if not get_settings().sms_ready:
+        return False, "no gateway configured"
+    r = await db.one("""select max(created_at) filter (where status = 'sent') as good,
+                               max(created_at) filter (where status = 'failed') as bad
+                          from app.notifications where channel = 'sms' and created_at > now() - interval '30 days'""")
+    return True, f"{sms.provider()}, sender {sms.sender() or 'default'}; last sent {_ago(r['good'])}, last failure {_ago(r['bad'])}"
+
+
+async def _t_email():
+    s = get_settings()
+    if not s.email_ready:
+        return False, "RESEND_API_KEY not set"
+    r = await db.one("""select max(created_at) filter (where status = 'sent') as good,
+                               max(created_at) filter (where status = 'failed') as bad
+                          from app.notifications where channel = 'email' and created_at > now() - interval '30 days'""")
+    return True, f"from {s.email_from}; last sent {_ago(r['good'])}, last failure {_ago(r['bad'])}"
+
+
+async def _t_deposits():
+    r = await db.one("""select count(*) as n from app.transactions
+                         where type = 'deposit' and status = 'pending' and created_at < now() - interval '15 minutes'""")
+    return r["n"] == 0, "none stuck" if r["n"] == 0 else f"{r['n']} deposits pending over 15 minutes"
+
+
+TESTS = {"database": _t_database, "schema": _t_schema, "feed": _t_feed, "payhero": _t_payhero, "kora": _t_kora,
+         "paystack": _t_paystack, "sms": _t_sms, "email": _t_email, "deposits": _t_deposits}
+
+
+@router.get("/tests/{name}")
+async def run_test(name: str, _: str = Depends(admin)):
+    if name not in TESTS:
+        raise HTTPException(status_code=404, detail="No such test.")
+    return {"name": name, **await _timed(TESTS[name])}
+
+
+class TestSend(BaseModel):
+    to: str = Field(min_length=3, max_length=120)
+
+
+@router.post("/tests/send-sms")
+async def test_send_sms(body: TestSend, ip: Principal = Depends(admin)):
+    """One text to any number, without involving a user's account."""
+    need(ip, "admin")
+    if not get_settings().sms_ready:
+        raise HTTPException(status_code=400, detail="No SMS gateway is configured.")
+    start = time.monotonic()
+    out = await sms.send(body.to.strip(), "obisflow test bench: this is a test message. No action needed.")
+    await _log("test.sms", body.to.strip(), None, f"{out['status']}: {out['detail']}"[:300], ip)
+    return {**out, "ms": round((time.monotonic() - start) * 1000), "sender": sms.sender()}
+
+
+@router.post("/tests/send-email")
+async def test_send_email(body: TestSend, ip: Principal = Depends(admin)):
+    need(ip, "admin")
+    to = body.to.strip()
+    if "@" not in to:
+        raise HTTPException(status_code=400, detail="Enter an email address.")
+    start = time.monotonic()
+    ok = await notify._send_email(None, "test", to, "obisflow test bench", notify._page(
+        "Test email", ["This is a test from the obisflow admin test bench. No action needed."]),
+        "This is a test from the obisflow admin test bench.")
+    await _log("test.email", to, None, "sent" if ok else "failed", ip)
+    return {"ok": ok, "detail": "sent" if ok else "not sent: see Logs for the reason", "ms": round((time.monotonic() - start) * 1000)}
+
+
+# ------------------------------------------------------- admin accounts --
+# sql/016_admin_users.sql. Passwords are scrypt; a session is a random token
+# stored as its SHA-256 for SESSION_HOURS.
+SESSION_HOURS = 12
+
+
+def _pw_hash(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=2 ** 14, r=8, p=1, dklen=32)
+    return f"scrypt$16384$8$1${base64.b64encode(salt).decode()}${base64.b64encode(digest).decode()}"
+
+
+def _pw_ok(password: str, stored: str) -> bool:
+    try:
+        _, n, r, p, salt, digest = stored.split("$")
+        got = hashlib.scrypt(password.encode(), salt=base64.b64decode(salt), n=int(n), r=int(r), p=int(p),
+                             dklen=len(base64.b64decode(digest)))
+        return hmac.compare_digest(got, base64.b64decode(digest))
+    except Exception:
+        return False
+
+
+# a hash to check against when the email is unknown, so a miss takes as long as a wrong password
+_DUMMY = _pw_hash(secrets.token_hex(8))
+
+
+def _gate() -> None:
+    if len(get_settings().admin_token) < 32:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+def _admin_row(r: dict) -> dict:
+    return {"id": str(r["id"]), "email": r["email"], "name": r["name"], "role": r["role"], "active": r["active"],
+            "createdAt": _iso(r["created_at"]), "lastLoginAt": _iso(r.get("last_login_at"))}
+
+
+async def _count_admins() -> int | None:
+    try:
+        return (await db.one("select count(*) as n from app.admin_users"))["n"]
+    except UndefinedTable:
+        return None
+
+
+async def _start_session(admin_id, request: Request) -> str:
+    token = secrets.token_urlsafe(32)
+    await db.run(
+        """insert into app.admin_sessions (token_hash, admin_id, ip, user_agent, expires_at)
+           values (%s, %s, %s, %s, now() + make_interval(hours => %s))""",
+        (_hash(token), admin_id, _ip(request), request.headers.get("user-agent", "")[:200], SESSION_HOURS))
+    await db.run("update app.admin_users set last_login_at = now() where id = %s", (admin_id,))
+    if secrets.randbelow(20) == 0:
+        await db.run("delete from app.admin_sessions where expires_at < now()")
+    return token
+
+
+class Login(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class Setup(BaseModel):
+    admin_token: str = Field(min_length=1, max_length=500)
+    email: str = Field(min_length=3, max_length=200)
+    name: str = Field(default="", max_length=80)
+    password: str = Field(min_length=10, max_length=200)
+
+
+@router.get("/auth/state")
+async def auth_state():
+    """Whether the first super admin still has to be made (and whether sql/016 is in)."""
+    _gate()
+    n = await _count_admins()
+    return {"ready": n is not None, "setup": n == 0}
+
+
+@router.post("/auth/setup")
+async def auth_setup(body: Setup, request: Request):
+    """The first super admin, made with ADMIN_TOKEN while there are no accounts."""
+    _gate()
+    ip = _ip(request)
+    _missed(ip)
+    if not hmac.compare_digest(body.admin_token.strip().encode(), get_settings().admin_token.encode()):
+        _misses[ip].append(time.monotonic())
+        raise HTTPException(status_code=401, detail="That admin token is not right.")
+    n = await _count_admins()
+    if n is None:
+        raise HTTPException(status_code=503, detail="Run sql/016_admin_users.sql on the database first.")
+    if n:
+        raise HTTPException(status_code=409, detail="The first super admin already exists. Sign in instead.")
+    row = await db.one(
+        "insert into app.admin_users (email, name, role, password_hash) values (%s, %s, 'superadmin', %s) returning *",
+        (body.email.strip().lower(), body.name.strip(), _pw_hash(body.password)))
+    who = Principal.make(ip, str(row["id"]), row["email"], row["name"], row["role"])
+    await _log("admin.setup", row["email"], None, "first super admin", who)
+    return {"token": await _start_session(row["id"], request), "me": _admin_row(row)}
+
+
+@router.post("/auth/login")
+async def auth_login(body: Login, request: Request):
+    _gate()
+    ip = _ip(request)
+    _missed(ip)
+    try:
+        row = await db.one("select * from app.admin_users where email = %s", (body.email.strip().lower(),))
+    except UndefinedTable:
+        raise HTTPException(status_code=503, detail="Run sql/016_admin_users.sql on the database first.")
+    ok = _pw_ok(body.password, row["password_hash"] if row else _DUMMY)
+    if not row or not ok:
+        _misses[ip].append(time.monotonic())
+        raise HTTPException(status_code=401, detail="That email and password do not match.")
+    if not row["active"]:
+        raise HTTPException(status_code=403, detail="This admin account is switched off. Ask a super admin.")
+    return {"token": await _start_session(row["id"], request), "me": _admin_row(row)}
+
+
+@router.post("/auth/logout")
+async def auth_logout(request: Request, who: Principal = Depends(admin)):
+    given = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    if who.id:
+        await db.run("delete from app.admin_sessions where token_hash = %s", (_hash(given),))
+    return {"ok": True}
+
+
+@router.get("/me")
+async def admin_me(who: Principal = Depends(admin)):
+    if not who.id:
+        return {"id": None, "email": who.email, "name": who.name, "role": who.role, "active": True,
+                "createdAt": None, "lastLoginAt": None, "sessions": []}
+    row = await db.one("select * from app.admin_users where id = %s", (who.id,))
+    sessions = await db.many(
+        "select ip, user_agent, created_at, expires_at from app.admin_sessions where admin_id = %s and expires_at > now() "
+        "order by created_at desc", (who.id,))
+    return {**_admin_row(row), "sessions": [{"ip": s["ip"], "device": s["user_agent"], "createdAt": _iso(s["created_at"]),
+                                             "expiresAt": _iso(s["expires_at"])} for s in sessions]}
+
+
+class Profile(BaseModel):
+    name: str = Field(max_length=80)
+
+
+class PasswordChange(BaseModel):
+    current: str = Field(min_length=1, max_length=200)
+    new: str = Field(min_length=10, max_length=200)
+
+
+def _own(who: Principal) -> str:
+    if not who.id:
+        raise HTTPException(status_code=400, detail="Signed in with ADMIN_TOKEN: there is no account to change.")
+    return who.id
+
+
+@router.post("/me/profile")
+async def admin_profile(body: Profile, who: Principal = Depends(admin)):
+    row = await db.one("update app.admin_users set name = %s where id = %s returning *", (body.name.strip(), _own(who)))
+    return _admin_row(row)
+
+
+@router.post("/me/password")
+async def admin_password(body: PasswordChange, request: Request, who: Principal = Depends(admin)):
+    row = await db.one("select password_hash from app.admin_users where id = %s", (_own(who),))
+    if not _pw_ok(body.current, row["password_hash"]):
+        raise HTTPException(status_code=400, detail="Your current password is not right.")
+    await db.run("update app.admin_users set password_hash = %s where id = %s", (_pw_hash(body.new), who.id))
+    given = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    # every other device is signed out; this one stays
+    await db.run("delete from app.admin_sessions where admin_id = %s and token_hash <> %s", (who.id, _hash(given)))
+    await _log("admin.password", who.email, None, "changed own password", who)
+    return {"ok": True}
+
+
+@router.post("/me/sign-out-others")
+async def admin_sign_out_others(request: Request, who: Principal = Depends(admin)):
+    given = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    n = await db.run("delete from app.admin_sessions where admin_id = %s and token_hash <> %s", (_own(who), _hash(given)))
+    return {"ended": n}
+
+
+class NewAdmin(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+    name: str = Field(default="", max_length=80)
+    role: Literal["superadmin", "admin", "finance", "support"]
+    password: str = Field(min_length=10, max_length=200)
+
+
+class AdminChange(BaseModel):
+    role: Literal["superadmin", "admin", "finance", "support"] | None = None
+    active: bool | None = None
+    password: str | None = Field(default=None, min_length=10, max_length=200)
+
+
+@router.get("/admins")
+async def list_admins(who: Principal = Depends(admin)):
+    need(who)
+    try:
+        rows = await db.many("select * from app.admin_users order by created_at")
+    except UndefinedTable:
+        raise HTTPException(status_code=503, detail="Run sql/016_admin_users.sql on the database first.")
+    return [_admin_row(r) for r in rows]
+
+
+@router.post("/admins", status_code=201)
+async def create_admin(body: NewAdmin, who: Principal = Depends(admin)):
+    need(who)
+    email = body.email.strip().lower()
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="Enter an email address.")
+    try:
+        row = await db.one(
+            "insert into app.admin_users (email, name, role, password_hash, created_by) values (%s, %s, %s, %s, %s) returning *",
+            (email, body.name.strip(), body.role, _pw_hash(body.password), who.id))
+    except UniqueViolation:
+        raise HTTPException(status_code=409, detail="There is already an admin with that email.")
+    await _log("admin.create", email, None, body.role, who)
+    return _admin_row(row)
+
+
+@router.post("/admins/{admin_id}")
+async def change_admin(admin_id: str, body: AdminChange, who: Principal = Depends(admin)):
+    need(who)
+    if admin_id == who.id and (body.active is False or (body.role and body.role != "superadmin")):
+        raise HTTPException(status_code=400, detail="You cannot demote or switch off your own account.")
+    try:
+        row = await db.one("select * from app.admin_users where id = %s", (admin_id,))
+    except Exception:
+        row = None
+    if not row:
+        raise HTTPException(status_code=404, detail="No such admin.")
+    if row["role"] == "superadmin" and (body.active is False or (body.role and body.role != "superadmin")):
+        left = await db.one("select count(*) as n from app.admin_users where role = 'superadmin' and active and id <> %s", (admin_id,))
+        if not left["n"]:
+            raise HTTPException(status_code=400, detail="There must always be one active super admin.")
+    changes = []
+    if body.role:
+        await db.run("update app.admin_users set role = %s where id = %s", (body.role, admin_id)); changes.append(f"role {body.role}")
+    if body.active is not None:
+        await db.run("update app.admin_users set active = %s where id = %s", (body.active, admin_id))
+        changes.append("switched on" if body.active else "switched off")
+    if body.password:
+        await db.run("update app.admin_users set password_hash = %s where id = %s", (_pw_hash(body.password), admin_id))
+        changes.append("password reset")
+    if body.active is False or body.password or body.role:
+        await db.run("delete from app.admin_sessions where admin_id = %s", (admin_id,))
+    await _log("admin.change", row["email"], None, ", ".join(changes) or "nothing", who)
+    return _admin_row(await db.one("select * from app.admin_users where id = %s", (admin_id,)))

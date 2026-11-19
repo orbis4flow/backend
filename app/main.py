@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from . import db, supabase_auth
 from .services import deposits, monitor, mpesa_demo, prices, sms, referrals as referral_jobs, tron
 from .config import get_settings
-from .routers import account, auth, market, me, mpesa, payment_methods, payments, referrals, support, trades, webhooks
+from .routers import account, auth, market, me, mpesa, payment_methods, payments, referrals, support, trades, verification, webhooks
 from .routers import admin as admin_router, prices as prices_router
 
 # psycopg's async driver needs the selector loop on Windows (local dev only)
@@ -103,7 +103,7 @@ async def unexpected(_: Request, exc: Exception):
 
 for r in (auth.router, me.router, payment_methods.router, referrals.router, payments.router, trades.router,
           market.router, prices_router.router, admin_router.router, account.router, support.router, webhooks.router,
-          mpesa.router):
+          mpesa.router, verification.router):
     app.include_router(r)
 
 
@@ -154,10 +154,17 @@ async def health():
             vip_rail = "ok"
         except Exception:                               # sql/013 not run yet
             vip_rail = "run sql/013_vip_mpesa.sql"
+    kyc = "unknown"
+    if database == "ok":
+        try:
+            await db.one("select 1 from app.verifications limit 1")
+            kyc = "ok"
+        except Exception:                               # sql/015 not run yet
+            kyc = "run sql/015_verification.sql"
     return {"ok": database == "ok", "database": database, "trading": trading, "notifications_usdt_referrals": extras,
             "preferences_security": security,
             "mpesa_provider": "kora" if s.mpesa_uses_kora else "payhero",
             "kora": s.kora_ready, "payhero": s.payhero_ready, "paystack": s.paystack_ready,
             "assistant": bool(s.groq_api_key), "email": s.email_ready, "sms": s.sms_ready,
-            "sms_gateway": sms.provider(), "sms_sender": sms.sender(), "vip_mpesa": vip_rail,
+            "sms_gateway": sms.provider(), "sms_sender": sms.sender(), "vip_mpesa": vip_rail, "verification": kyc,
             "news": bool(s.finnhub_api_key)}

@@ -29,7 +29,7 @@ from ..config import get_settings
 from ..security import AuthUser, current_user
 from psycopg.errors import UniqueViolation
 
-from ..services import events, kora, ledger, limits, mpesa_demo, notify, otp, payhero, paystack, profiles, settle, tron
+from ..services import events, kora, ledger, limits, mpesa_demo, notify, otp, payhero, paystack, profiles, settle, tron, verification
 from ..util import kenyan_msisdn, kes_down, kes_up, mask_phone, reference, show_date, usd
 from .payment_methods import upsert_mpesa
 
@@ -392,6 +392,10 @@ async def withdraw(body: Withdrawal, user: AuthUser = Depends(current_user)):
         raise HTTPException(status_code=400, detail="Cards cannot receive withdrawals. Choose M-Pesa, a bank or a wallet.")
     if p.get("is_vip"):
         return await _vip_withdraw(user, m, amount, fee)
+    if not await verification.identity_approved(user.id):
+        raise HTTPException(status_code=403, detail=(
+            "Verify your identity before you withdraw. Send a photo of your ID or passport from the Verification "
+            "page; it is usually reviewed within a working day."), headers={"X-Orbis-Verify": "identity"})
     if m["status"] != "verified":
         raise HTTPException(status_code=400, detail=(
             "Make one deposit from this M-Pesa number first. That confirms it is yours."

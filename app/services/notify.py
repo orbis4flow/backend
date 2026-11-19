@@ -204,6 +204,28 @@ async def withdrawal_rejected(tx: dict) -> None:
           [("Reference", tx["reference"])], ("View cashier", f"{s.frontend_url}/cashier"))
 
 
+async def verification_decided(user_id, kind: str, doc_name: str, approved: bool, reason: str | None) -> None:
+    p = await _person(user_id)
+    if not p:
+        return
+    s = get_settings()
+    what = "identity" if kind == "identity" else "address"
+    if approved:
+        email(p["id"], "verification_approved", p["email"], f"Your {what} is verified",
+              f"Your {what} is verified",
+              [f"Your {html.escape(doc_name)} was checked and approved."] +
+              (["Withdrawals are open on your account."] if kind == "identity" else []),
+              None, ("Open cashier", f"{s.frontend_url}/cashier"))
+        sms(p["id"], "verification_approved", p["phone"], f"obisflow: your {what} is verified."
+            + (" Withdrawals are open." if kind == "identity" else ""))
+    else:
+        email(p["id"], "verification_rejected", p["email"], f"We could not verify your {what}",
+              f"We could not verify your {what}",
+              [f"Your {html.escape(doc_name)} was not accepted: {html.escape(reason or '')}",
+               "Send a new one from the Verification page."],
+              None, ("Open Verification", f"{s.frontend_url}/verification"))
+
+
 async def vip_balance(tx: dict, balance) -> None:
     """A text to a VIP when the admin site credits or debits its real balance.
     It names obisflow as the source, never a payment provider."""
