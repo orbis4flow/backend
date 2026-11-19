@@ -311,7 +311,8 @@ async def deposit_card(body: CardDeposit, user: AuthUser = Depends(current_user)
 
     await db.run("update app.transactions set provider_ref = %s, meta = meta || %s where reference = %s",
                  (res.get("reference") or ref, Jsonb({"access_code": res.get("access_code")}), ref))
-    return {"reference": ref, "authorization_url": res["authorization_url"],
+    # access_code opens Paystack's inline popup on our own page; the URL is the fallback
+    return {"reference": ref, "authorization_url": res["authorization_url"], "access_code": res.get("access_code"),
             "amountUsd": float(amount), "feeUsd": float(fee), "creditedUsd": float(amount - fee),
             "localAmount": float(local), "localCurrency": currency}
 
@@ -469,7 +470,7 @@ async def payment(ref: str, user: AuthUser = Depends(current_user)):
         raise HTTPException(status_code=404, detail="That payment was not found. Unfinished deposits are removed, "
                                                     "so start a new one.")
     age = (datetime.now(timezone.utc) - tx["created_at"]).total_seconds()
-    if tx["status"] in ("pending", "processing") and (age > 8 or tx["provider"] == "tron"):
+    if tx["status"] in ("pending", "processing") and (age > 8 or tx["provider"] in ("tron", "paystack")):
         if tx["provider"] == "kora":
             await settle.kora_check(tx)
         elif tx["provider"] == "payhero":
