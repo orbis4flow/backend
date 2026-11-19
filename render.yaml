@@ -55,6 +55,13 @@ services:
       # console.groq.com → API Keys (free): the Live chat assistant
       - key: GROQ_API_KEY
         sync: false
+      # resend.com → API Keys (Sending access); EMAIL_FROM must be on a domain verified in Resend
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        value: obisflow <no-reply@obisflow.com>
+      - key: SUPPORT_EMAIL
+        value: support@obisflow.com
       # Paystack → Settings → API Keys & Webhooks: the secret key
       - key: PAYSTACK_SECRET_KEY
         sync: false

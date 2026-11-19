@@ -1283,7 +1283,8 @@ async def create_admin(body: NewAdmin, who: Principal = Depends(admin)):
     except UniqueViolation:
         raise HTTPException(status_code=409, detail="There is already an admin with that email.")
     await _log("admin.create", email, None, body.role, who)
-    return _admin_row(row)
+    sent = await notify.admin_invite(email, body.name.strip(), body.role, body.password, who.name or who.email)
+    return {**_admin_row(row), "emailed": sent}
 
 
 @router.post("/admins/{admin_id}")
@@ -1313,7 +1314,10 @@ async def change_admin(admin_id: str, body: AdminChange, who: Principal = Depend
     if body.active is False or body.password or body.role:
         await db.run("delete from app.admin_sessions where admin_id = %s", (admin_id,))
     await _log("admin.change", row["email"], None, ", ".join(changes) or "nothing", who)
-    return _admin_row(await db.one("select * from app.admin_users where id = %s", (admin_id,)))
+    sent = None
+    if body.password:
+        sent = await notify.admin_password_reset(row["email"], row["name"], body.password, who.name or who.email)
+    return {**_admin_row(await db.one("select * from app.admin_users where id = %s", (admin_id,))), "emailed": sent}
 
 
 # ------------------------------------------------------------------ status --

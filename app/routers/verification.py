@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from .. import db
 from ..security import AuthUser, current_user
-from ..services import events, profiles, verification
+from ..services import events, notify, profiles, verification
 
 router = APIRouter(tags=["verification"])
 
@@ -69,4 +69,5 @@ async def submit(body: Submission, user: AuthUser = Depends(current_user)):
         raise HTTPException(status_code=503, detail="Verification is not open yet. Try again later.")
     await events.record("verification.submit", True, provider=body.kind, ref=str(vid), user_id=user.id,
                         detail=f"{verification.DOC_NAME[body.doc_type]}, {sum(len(f[2]) for f in files) // 1024} KB")
+    notify._later(notify.verification_received(user.id, body.kind, verification.DOC_NAME[body.doc_type]))
     return await verification.state(user.id)
