@@ -111,7 +111,7 @@ def test_paystack_signature(monkeypatch):
 # ---------------------------------------------------------------------- api --
 def test_rates_reflect_the_rules():
     r = client.get("/rates").json()
-    assert r["minDepositUsd"] == 5 and r["minWithdrawUsd"] == 5 and r["withdrawFeeUsd"] == 1
+    assert r["minDepositUsd"] == 1 and r["minWithdrawUsd"] == 5 and r["withdrawFeeUsd"] == 1
 
 
 def test_signed_in_routes_need_a_token():
