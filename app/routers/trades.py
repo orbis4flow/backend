@@ -13,8 +13,7 @@ refunded.
 
 A VIP with staged results switched on from the admin site (sql/014) has its
 contracts settled in its favour STAGED_WIN_PCT of the time instead, with the
-feed's exit price still recorded. Those contracts are marked staged, and the
-account's screens carry a DEMO tag while the switch is on.
+feed's exit price still recorded. Those contracts are marked staged.
 """
 import asyncio
 import secrets

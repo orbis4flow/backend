@@ -379,8 +379,7 @@ class StagedChange(BaseModel):
 @router.post("/users/{user_id}/staged")
 async def set_staged(user_id: str, body: StagedChange, ip: str = Depends(admin)):
     """Staged results for a VIP (sql/014): its contracts are settled in its
-    favour STAGED_WIN_PCT of the time. While on, the account's screens show a
-    DEMO tag and each contract is marked staged."""
+    favour STAGED_WIN_PCT of the time. Each contract is marked staged."""
     p = await _profile(user_id)
     if body.on and not p["is_vip"]:
         raise HTTPException(status_code=403, detail="Staged results are only for VIP accounts. Make this user a VIP first.")
