@@ -63,7 +63,10 @@ class Principal(str):
         return p
 
 
-ROLES = ("superadmin", "admin", "finance", "support")
+ROLES = ("superadmin", "admin", "finance", "support", "marketer")
+
+# a marketer sees only their own live sessions (sql/017); everything else answers 403
+MARKETER_PATHS = ("/admin/me", "/admin/auth/", "/admin/live")
 
 
 def need(who: Principal, *roles: str) -> None:
@@ -102,6 +105,8 @@ async def admin(request: Request) -> Principal:
         except Exception:                               # sql/016 not run, or the database is down
             row = None
         if row:
+            if row["role"] == "marketer" and not request.url.path.startswith(MARKETER_PATHS):
+                raise HTTPException(status_code=403, detail="Marketer accounts only see their live sessions.")
             return Principal.make(ip, str(row["id"]), row["email"], row["name"], row["role"])
     _misses[ip].append(time.monotonic())
     raise HTTPException(status_code=401, detail="Your session has ended. Sign in again.")
@@ -248,8 +253,6 @@ async def user(user_id: str, _: str = Depends(admin)):
         """select reference, type, method, status, amount_usd, fee_usd, net_usd, local_amount, local_currency,
                   destination, provider_receipt, failure_reason, created_at, completed_at
              from app.transactions where user_id = %s order by created_at desc limit 50""", (user_id,))
-    trades = await db.many(
-        "select * from app.trades where user_id = %s order by opened_at desc limit 50", (user_id,))
     methods = await db.many(
         """select id, kind, label, masked, status, is_default, created_at, removed_at
              from app.payment_methods where user_id = %s order by created_at desc""", (user_id,))
@@ -272,7 +275,6 @@ async def user(user_id: str, _: str = Depends(admin)):
         "balances": {a["kind"]: _f(a["balance"]) for a in accounts},
         "deposited": _f(summary["deposited"]), "withdrawn": _f(summary["withdrawn"]), "realPl": _f(real_pl["pl"]),
         "transactions": [_tx(t) for t in txs],
-        "trades": [_trade(t) for t in trades],
         "methods": [{"id": str(m["id"]), "kind": m["kind"], "label": m["label"], "masked": m["masked"],
                      "status": m["status"], "isDefault": m["is_default"], "createdAt": _iso(m["created_at"]),
                      "removed": m["removed_at"] is not None} for m in methods],
@@ -286,17 +288,6 @@ def _tx(t: dict) -> dict:
             "localCurrency": t.get("local_currency"), "destination": t.get("destination"),
             "receipt": t.get("provider_receipt"), "failure": t.get("failure_reason"),
             "createdAt": _iso(t["created_at"]), "completedAt": _iso(t.get("completed_at")),
-            **({"email": t["email"], "userId": str(t["user_id"])} if "email" in t else {}),
-            **({"vip": t["is_vip"]} if "is_vip" in t else {})}
-
-
-def _trade(t: dict) -> dict:
-    return {"staged": bool(t.get("staged")), "ref": t["ref"], "account": t["account_kind"], "symbol": t["symbol"], "direction": t["direction"],
-            "stake": _f(t["stake"]), "payout": _f(t["payout_pct"]),
-            "entry": format(t["entry_price"].normalize(), "f") if t["entry_price"] is not None else None,
-            "exit": format(t["exit_price"].normalize(), "f") if t["exit_price"] is not None else None,
-            "status": t["status"], "profit": _f(t["profit"]) if t["profit"] is not None else None,
-            "openedAt": _iso(t["opened_at"]), "settledAt": _iso(t["settled_at"]),
             **({"email": t["email"], "userId": str(t["user_id"])} if "email" in t else {}),
             **({"vip": t["is_vip"]} if "is_vip" in t else {})}
 
@@ -677,23 +668,6 @@ async def change_method(method_id: str, action: Literal["verify", "block"], body
             raise HTTPException(status_code=409, detail="That method is already verified.")
         await _log(f"method.{action}", method_id, m["user_id"], body.note, ip, conn)
     return {"id": str(m["id"]), "status": m["status"]}
-
-
-# ------------------------------------------------------------------ trades --
-@router.get("/trades")
-async def trades(account: Literal["real", "demo", "all"] = "real", status: Literal["open", "settled", "all"] = "all",
-                 limit: int = Query(default=100, ge=1, le=500), _: str = Depends(admin)):
-    where, args = ["true"], []
-    if account != "all":
-        where.append("t.account_kind = %s"); args.append(account)
-    if status == "open":
-        where.append("t.status = 'open'")
-    elif status == "settled":
-        where.append("t.status <> 'open'")
-    rows = await db.many(
-        f"""select t.*, p.email, p.is_vip from app.trades t join app.profiles p on p.id = t.user_id
-             where {' and '.join(where)} order by t.opened_at desc limit %s""", (*args, limit))
-    return [_trade(t) for t in rows]
 
 
 # -------------------------------------------------------------------- logs --
@@ -1223,12 +1197,12 @@ async def auth_logout(request: Request, who: Principal = Depends(admin)):
 async def admin_me(who: Principal = Depends(admin)):
     if not who.id:
         return {"id": None, "email": who.email, "name": who.name, "role": who.role, "active": True,
-                "createdAt": None, "lastLoginAt": None, "sessions": []}
+                "createdAt": None, "lastLoginAt": None, "sessions": [], "usdKesRate": get_settings().usd_kes_rate}
     row = await db.one("select * from app.admin_users where id = %s", (who.id,))
     sessions = await db.many(
         "select ip, user_agent, created_at, expires_at from app.admin_sessions where admin_id = %s and expires_at > now() "
         "order by created_at desc", (who.id,))
-    return {**_admin_row(row), "sessions": [{"ip": s["ip"], "device": s["user_agent"], "createdAt": _iso(s["created_at"]),
+    return {**_admin_row(row), "usdKesRate": get_settings().usd_kes_rate, "sessions": [{"ip": s["ip"], "device": s["user_agent"], "createdAt": _iso(s["created_at"]),
                                              "expiresAt": _iso(s["expires_at"])} for s in sessions]}
 
 
@@ -1276,12 +1250,12 @@ async def admin_sign_out_others(request: Request, who: Principal = Depends(admin
 class NewAdmin(BaseModel):
     email: str = Field(min_length=3, max_length=200)
     name: str = Field(default="", max_length=80)
-    role: Literal["superadmin", "admin", "finance", "support"]
+    role: Literal["superadmin", "admin", "finance", "support", "marketer"]
     password: str = Field(min_length=10, max_length=200)
 
 
 class AdminChange(BaseModel):
-    role: Literal["superadmin", "admin", "finance", "support"] | None = None
+    role: Literal["superadmin", "admin", "finance", "support", "marketer"] | None = None
     active: bool | None = None
     password: str | None = Field(default=None, min_length=10, max_length=200)
 
@@ -1340,3 +1314,178 @@ async def change_admin(admin_id: str, body: AdminChange, who: Principal = Depend
         await db.run("delete from app.admin_sessions where admin_id = %s", (admin_id,))
     await _log("admin.change", row["email"], None, ", ".join(changes) or "nothing", who)
     return _admin_row(await db.one("select * from app.admin_users where id = %s", (admin_id,)))
+
+
+# ------------------------------------------------------------------ status --
+async def _probe(name: str, fn) -> dict:
+    start = time.monotonic()
+    try:
+        state, detail = await fn()
+    except Exception as e:
+        state, detail = "down", str(e) or e.__class__.__name__
+    return {"key": name, "state": state, "detail": detail, "ms": round((time.monotonic() - start) * 1000)}
+
+
+async def _recent(where: str, args: tuple) -> dict:
+    return await db.one(
+        f"""select count(*) filter (where ok) as good, count(*) filter (where not ok) as bad,
+                   max(created_at) filter (where ok) as last_good, max(created_at) filter (where not ok) as last_bad
+              from app.events where created_at > now() - interval '24 hours' and {where}""", args)
+
+
+def _judge(r: dict, idle: str) -> tuple[str, str]:
+    """Up when the latest call worked, warn when the latest one failed, idle when nothing ran."""
+    if not r["good"] and not r["bad"]:
+        return "idle", idle
+    if r["last_bad"] and (not r["last_good"] or r["last_bad"] > r["last_good"]):
+        return "warn", f"last call failed {_ago(r['last_bad'])}; {r['good']} ok, {r['bad']} failed in 24 h"
+    return "up", f"{r['good']} ok, {r['bad']} failed in 24 h; last ok {_ago(r['last_good'])}"
+
+
+async def _s_database():
+    await db.one("select 1 from app.profiles limit 1")
+    return "up", "answering"
+
+
+async def _s_payments():
+    s = get_settings()
+    if not (s.payhero_ready or s.kora_ready):
+        return "down", "no M-Pesa provider configured"
+    stuck = (await db.one("""select count(*) as n from app.transactions where type = 'deposit' and status = 'pending'
+                              and created_at < now() - interval '15 minutes'
+                              and created_at > now() - interval '24 hours'"""))["n"]
+    state, detail = _judge(await _recent("(kind like %s or kind like %s)", ("mpesa%", "webhook%")), "no M-Pesa calls in 24 h")
+    if stuck:
+        return "warn", f"{stuck} deposits stuck at pending; " + detail
+    return state, detail
+
+
+async def _notes(channel: str) -> dict:
+    return await db.one(
+        """select count(*) filter (where status = 'sent') as good, count(*) filter (where status = 'failed') as bad,
+                  max(created_at) filter (where status = 'sent') as last_good,
+                  max(created_at) filter (where status = 'failed') as last_bad
+             from app.notifications where channel = %s and created_at > now() - interval '24 hours'""", (channel,))
+
+
+async def _s_sms():
+    if not get_settings().sms_ready:
+        return "down", "no SMS gateway configured"
+    state, detail = _judge(await _notes("sms"), "no texts sent in 24 h")
+    return state, f"{sms.provider()}: {detail}"
+
+
+async def _s_email():
+    if not get_settings().email_ready:
+        return "down", "RESEND_API_KEY not set"
+    return _judge(await _notes("email"), "no emails sent in 24 h")
+
+
+async def _s_feed():
+    snap = prices.snapshot()
+    live = sum(1 for v in snap.values() if v["live"])
+    total = len(prices.MARKETS)
+    return ("up" if live == total else "warn" if live else "down"), f"{live} of {total} markets ticking"
+
+
+@router.get("/status")
+async def service_status(_: str = Depends(admin)):
+    """The key services, each up, warn (working but its latest call failed), idle or down."""
+    import asyncio
+    checks = {"database": _s_database, "payments": _s_payments, "sms": _s_sms, "email": _s_email, "feed": _s_feed}
+    return await asyncio.gather(*(_probe(k, f) for k, f in checks.items()))
+
+
+# -------------------------------------------------------------- live sessions --
+# sql/017_marketers.sql. Real money deposited while a session runs (VIPs left
+# out) is the marketer's. Only one session runs at a time.
+_LIVE_FIGURES = """
+    select l.*, u.name as marketer_name, u.email as marketer_email,
+           coalesce(f.usd, 0) as usd, coalesce(f.n, 0) as n, coalesce(f.depositors, 0) as depositors,
+           coalesce(g.signups, 0) as signups
+      from app.live_sessions l
+      join app.admin_users u on u.id = l.marketer_id
+      left join lateral (
+        select sum(t.net_usd) as usd, count(*) as n, count(distinct t.user_id) as depositors
+          from app.transactions t join app.profiles p on p.id = t.user_id
+         where t.type = 'deposit' and t.status = 'completed' and not p.is_vip
+           and t.completed_at >= l.started_at and t.completed_at < coalesce(l.ended_at, now())) f on true
+      left join lateral (
+        select count(*) as signups from app.profiles p
+         where p.created_at >= l.started_at and p.created_at < coalesce(l.ended_at, now())) g on true"""
+
+
+def _live_row(r: dict, full: bool) -> dict:
+    out = {"id": str(r["id"]), "channel": r["channel"], "note": r["note"], "startedAt": _iso(r["started_at"]),
+           "endedAt": _iso(r["ended_at"]), "live": r["ended_at"] is None,
+           "deposits": _f(r["usd"]), "depositCount": r["n"]}
+    if full:                                            # admins also see who, and how many people
+        out.update(marketerId=str(r["marketer_id"]), marketer=r["marketer_name"] or r["marketer_email"],
+                   marketerEmail=r["marketer_email"], depositors=r["depositors"], signups=r["signups"])
+    return out
+
+
+@router.get("/live")
+async def live_sessions(who: Principal = Depends(admin)):
+    mine = who.role == "marketer"
+    try:
+        rows = await db.many(f"{_LIVE_FIGURES} {'where l.marketer_id = %s' if mine else ''} "
+                             "order by l.started_at desc limit 200", (who.id,) if mine else ())
+        other = await db.one("select 1 as x from app.live_sessions where ended_at is null and marketer_id is distinct from %s",
+                             (who.id,))
+        marketers = [] if mine else await db.many(
+            "select id, name, email from app.admin_users where role = 'marketer' and active order by name, email")
+    except UndefinedTable:
+        raise HTTPException(status_code=503, detail="Run sql/017_marketers.sql on the database first.")
+    sessions = [_live_row(r, not mine) for r in rows]
+    return {"sessions": sessions, "someoneElseLive": bool(other) if mine else None,
+            "totals": {"deposits": sum(x["deposits"] for x in sessions), "depositCount": sum(x["depositCount"] for x in sessions),
+                       "sessions": len(sessions)},
+            "marketers": [{"id": str(m["id"]), "name": m["name"] or m["email"]} for m in marketers],
+            "usdKesRate": get_settings().usd_kes_rate}
+
+
+class GoLive(BaseModel):
+    channel: str = Field(default="", max_length=40)
+    note: str | None = Field(default=None, max_length=200)
+    marketer_id: str | None = None                     # admins start one for a marketer; a marketer starts their own
+
+
+@router.post("/live/start", status_code=201)
+async def go_live(body: GoLive, who: Principal = Depends(admin)):
+    if who.role == "marketer":
+        marketer = who.id
+    else:
+        need(who, "admin")
+        marketer = body.marketer_id
+        try:
+            ok = marketer and await db.one("select 1 from app.admin_users where id = %s and role = 'marketer' and active", (marketer,))
+        except Exception:
+            ok = None
+        if not ok:
+            raise HTTPException(status_code=400, detail="Choose a marketer.")
+    try:
+        row = await db.one(
+            "insert into app.live_sessions (marketer_id, channel, note, started_by) values (%s, %s, %s, %s) returning id",
+            (marketer, body.channel.strip(), (body.note or "").strip() or None, who.id))
+    except UniqueViolation:
+        raise HTTPException(status_code=409, detail="Another session is live. It has to end first, so money is not counted twice.")
+    await _log("live.start", str(row["id"]), None, body.channel.strip() or None, who)
+    return {"id": str(row["id"])}
+
+
+@router.post("/live/{sid}/end")
+async def end_live(sid: str, who: Principal = Depends(admin)):
+    if who.role != "marketer":
+        need(who, "admin")
+    try:
+        row = await db.one(
+            f"""update app.live_sessions set ended_at = now(), ended_by = %s
+                 where id = %s and ended_at is null {'and marketer_id = %s' if who.role == 'marketer' else ''}
+             returning id""", (who.id, sid, *([who.id] if who.role == "marketer" else [])))
+    except Exception:
+        row = None
+    if not row:
+        raise HTTPException(status_code=409, detail="That session is not live.")
+    await _log("live.end", sid, None, None, who)
+    return {"id": sid}
